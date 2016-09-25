@@ -19,104 +19,18 @@ IMPLEMENT_SERIAL_TXN_INTERRUPTS(E,sevenSeg_I2C)
 
 //SevenSeg< CSerialTxn< CSerialTxnPolledImpl< CMegaI2CE > >, SLAVE_ADDR> sevenSeg_I2C;
 
-#define INTERRUPTED
-
-static void WaitForI2CIdle() { while ( (TWIE.MASTER.STATUS & TWI_MASTER_WIF_bm) == 0 ); }
-static void SendI2CStop() { TWIE.MASTER.STATUS = TWI_MASTER_CMD_STOP_gc; }
 
 static void InitI2C()
 {
-#ifdef INTERRUPTED
 	PR.PRPE &= ~PR_TWI_bm;
 	sevenSeg_I2C.Init();
-#else
-	PR.PRPE &= ~PR_TWI_bm;
-
-	//PORTE.PIN0CTRL =
-	//PORTCFG.MPCMASK = 0x03; // Configure several PINxCTRL registers at the same time
-	//PORTE.PIN0CTRL = (PORTE.PIN0CTRL & ~PORT_OPC_gm) | PORT_OPC_PULLUP_gc; //Enable pull-up to get a defined level on the switches
-
-	TWIE.CTRL = 0;
-	TWIE.MASTER.CTRLA = TWI_MASTER_ENABLE_bm;
-	TWIE.MASTER.CTRLB = 0;
-	TWIE.MASTER.CTRLC = 0;
-	TWIE.MASTER.BAUD = 155; // 32MHz -> 400khz
-//	TWIE.MASTER.BAUD = 5; // 1MHz -> 100khz
-	TWIE.MASTER.STATUS = TWI_MASTER_BUSSTATE_IDLE_gc;
-
-	TWIE.MASTER.ADDR = SLAVE_ADDR;
-	WaitForI2CIdle();
-	TWIE.MASTER.DATA = 0x21;
-	WaitForI2CIdle();
-	SendI2CStop();
-
-	//TWIE.MASTER.STATUS = TWI_MASTER_BUSSTATE_IDLE_gc;
-	//while ( (TWIE.MASTER.STATUS & TWI_MASTER_BUSSTATE_gm) != TWI_MASTER_BUSSTATE_IDLE_gc );
-	//	WaitForI2CIdle();
-	TWIE.MASTER.ADDR = SLAVE_ADDR;
-	WaitForI2CIdle();
-	TWIE.MASTER.DATA = HT16K33_CMD_BRIGHTNESS | 4;
-	WaitForI2CIdle();
-	SendI2CStop();
-
-	//TWIE.MASTER.STATUS = TWI_MASTER_BUSSTATE_IDLE_gc;
-	//while ( (TWIE.MASTER.STATUS & TWI_MASTER_BUSSTATE_gm) != TWI_MASTER_BUSSTATE_IDLE_gc );
-	//	WaitForI2CIdle();
-	TWIE.MASTER.ADDR = SLAVE_ADDR;
-	WaitForI2CIdle();
-	TWIE.MASTER.DATA = HT16K33_BLINK_CMD | HT16K33_BLINK_DISPLAYON | (0 << 1);
-	WaitForI2CIdle();
-	SendI2CStop();
-
-	//TWIE.MASTER.STATUS = TWI_MASTER_BUSSTATE_IDLE_gc;
-	//while ( (TWIE.MASTER.STATUS & TWI_MASTER_BUSSTATE_gm) != TWI_MASTER_BUSSTATE_IDLE_gc );
-	//	WaitForI2CIdle();
-	TWIE.MASTER.ADDR = SLAVE_ADDR;
-	WaitForI2CIdle();
-
-	// decimal point 0x80
-	TWIE.MASTER.DATA = 0;
-	WaitForI2CIdle();
-	for ( int i = 0; i < 10; i++ )
-	{
-		TWIE.MASTER.DATA = 0;
-		WaitForI2CIdle();
-	}
-	SendI2CStop();
-#endif
 }
-
-
-
-#ifdef INTERRUPTED
-#else
-static void DisplayUpdate( uint16_t *data, uint8_t len )
-{
-	TWIE.MASTER.ADDR = SLAVE_ADDR;
-	WaitForI2CIdle();
-
-	TWIE.MASTER.DATA = 0;
-	WaitForI2CIdle();
-
-	for ( int i = 0; i < len; i++ )
-	{
-		TWIE.MASTER.DATA = data[i] & 0xFF;
-		WaitForI2CIdle();
-
-		TWIE.MASTER.DATA = data[i] >> 8;
-		WaitForI2CIdle();
-	}
-	SendI2CStop();
-}
-#endif // endif
 
 static void Flash()
 {
-
-#ifdef INTERRUPTED
+	// at the 1/2 second mark, turn off the colon (row 4)
 	static const uint8_t data[] = {SLAVE_ADDR, 4, 0 };
 	sevenSeg_I2C.SendTxn(data, countof(data));
-#endif
 }
 
 
@@ -193,12 +107,7 @@ static void ShowTime( long nSeconds )
 	if ( pm )
 		data.data[4] |= 0x80;
 	
-#ifdef INTERRUPTED
 	sevenSeg_I2C.SendTxn( (uint8_t *)&data, sizeof(data) );
-#else
-	DisplayUpdate( data.data, 5 );
-#endif
-
 }
 
 
@@ -264,10 +173,7 @@ int main(void)
 	ioinit();
 	sei();
 
-#ifdef INTERRUPTED
 	sevenSeg_I2C.Start();
-#endif
-
 
 	long n = 0;
     while (1) 
