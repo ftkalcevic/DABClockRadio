@@ -446,8 +446,8 @@ public:
 	{
 		if ( bEnabled )
 		{
-			SendHex( v >> 8 );
-			SendHex( v & 0xFF );
+			SendHex( (uint8_t)(v >> 8) );
+			SendHex( (uint8_t)(v & 0xFF) );
 		}
 	}
 

@@ -11,6 +11,7 @@
 
 #include "time.h"
 #include "ic2_7seg.h"
+#include "serial.h"
 
 #define SLAVE_ADDR (0x70<<1)
 
@@ -19,6 +20,9 @@ IMPLEMENT_SERIAL_TXN_INTERRUPTS(E,sevenSeg_I2C)
 
 //SevenSeg< CSerialTxn< CSerialTxnPolledImpl< CMegaI2CE > >, SLAVE_ADDR> sevenSeg_I2C;
 
+CSerial< CSerialImpl<CMegaSerialC0,64,64> > terminal;
+IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
+
 
 static void InitI2C()
 {
@@ -26,10 +30,10 @@ static void InitI2C()
 	sevenSeg_I2C.Init();
 }
 
-static void Flash()
+static void Flash(bool bOn)
 {
 	// at the 1/2 second mark, turn off the colon (row 4)
-	static const uint8_t data[] = {SLAVE_ADDR, 4, 0 };
+	uint8_t data[] = {SLAVE_ADDR, 4, (uint8_t)(bOn?0xFF:0) };
 	sevenSeg_I2C.SendTxn(data, countof(data));
 }
 
@@ -132,24 +136,37 @@ static void ioinit()
 	PR.PRPF = 0xFF;
 
 	// main clock to 32MHz
-	OSC.CTRL = OSC_RC32MEN_bm;
-	while ( (OSC.STATUS & OSC_RC32MRDY_bm) == 0 )
-		continue;
 
-	_PROTECTED_WRITE(CLK_PSCTRL, 0);
-	_PROTECTED_WRITE(CLK_CTRL, CLK_SCLKSEL_RC32M_gc);
-	//CCP = CCP_IOREG_gc;
-	//CLK.PSCTRL = 0;
-	//CCP = CCP_IOREG_gc;
-	//CLK.CTRL = CLK_SCLKSEL_RC32M_gc;
-
-	// Enable dfll32m
-	OSC.XOSCCTRL = OSC_XOSCSEL_32KHz_gc;
+	// Enable 16MHz Ext Crystal
+	OSC.XOSCCTRL = OSC_XOSCSEL_XTAL_256CLK_gc | OSC_FRQRANGE_12TO16_gc;
 	OSC.CTRL |= OSC_XOSCEN_bm;
+	// Wait till stable.
 	while ( (OSC.STATUS & OSC_XOSCRDY_bm) == 0 )
 		continue;
-	OSC.DFLLCTRL = OSC_RC32MCREF_XOSC32K_gc;
-	DFLLRC32M.CTRL = DFLL_ENABLE_bm;
+
+	// PLL x2
+	OSC.PLLCTRL = OSC_PLLSRC_XOSC_gc | 2;
+	OSC.CTRL |= OSC_PLLEN_bm;
+	while ( (OSC.STATUS & OSC_PLLRDY_bm) == 0 )
+		continue;
+
+	// Select it as the new clock
+	_PROTECTED_WRITE(CLK_PSCTRL, 0);
+	_PROTECTED_WRITE(CLK_CTRL, CLK_SCLKSEL_PLL_gc);
+
+
+	// RTC 
+	PR.PRGEN &= ~PR_RTC_bm;
+	CLK.RTCCTRL =  CLK_RTCSRC_TOSC_gc | CLK_RTCEN_bm;
+	RTC.CTRL = RTC_PRESCALER_DIV1_gc;
+
+	//// Enable dfll32m
+	//OSC.XOSCCTRL = OSC_XOSCSEL_32KHz_gc;
+	//OSC.CTRL |= OSC_XOSCEN_bm;
+	////while ( (OSC.STATUS & OSC_XOSCRDY_bm) == 0 )
+		////continue;
+	//OSC.DFLLCTRL = OSC_RC32MCREF_XOSC32K_gc;
+	//DFLLRC32M.CTRL = DFLL_ENABLE_bm;
 
 	InitI2C();
 
@@ -164,23 +181,117 @@ static void ioinit()
 	TCC0.INTCTRLB = 0;
 	TCC0.PER = 500;
 
+	// USART C0 - debug terminal
+	PR.PRPC &= ~PR_USART0_bm;
+	PORTC.DIRSET = PIN3_bm;	// TX is output, RX is input
+	PORTC.OUTSET = PIN3_bm;	// set high
+
+    // Encoder 
+	PR.PRGEN  &= ~PR_EVSYS_bm;
+	PR.PRPC &= ~PR_TC1_bm;
+
+    PORTC.DIRCLR = PIN0_bm | PIN1_bm;
+    PORTC.PIN0CTRL = PORT_OPC_PULLUP_gc | PORT_ISC_LEVEL_gc;
+    PORTC.PIN1CTRL = PORT_OPC_PULLUP_gc | PORT_ISC_LEVEL_gc;
+    
+    EVSYS.CH0MUX = EVSYS_CHMUX_PORTC_PIN0_gc;
+    EVSYS.CH0CTRL = EVSYS_QDEN_bm | EVSYS_DIGFILT_2SAMPLES_gc;
+    
+    TCC1.CTRLD = TC_EVACT_QDEC_gc | TC_EVSEL_CH0_gc;
+    TCC1.PER = 0xFFFF;
+    TCC1.CTRLA = TC_CLKSEL_DIV1_gc;
+
+	// Key pins - b is always pull down input
+	PORTCFG.MPCMASK = 0x3;
+	PORTB.PIN0CTRL = PORT_OPC_PULLDOWN_gc;
+	PORTB.DIRCLR = 3;
+
 	// Enable interrupt controller
 	PMIC.CTRL = PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm | PMIC_HILVLEN_bm;
 }
 
+static uint16_t PollPins( uint8_t pin, uint8_t next_pin )
+{
+	uint16_t n = (PORTA.IN & ~_BV(pin)) | ((PORTB.IN & 3) << 8);
+
+	uint8_t nMask = 1 << next_pin;
+	uint8_t nNotMask = ~nMask;
+
+	// Keypad keys A0-8 B0-1
+	PORTCFG.MPCMASK = 0xFF;
+	PORTA.PIN0CTRL = PORT_OPC_PULLDOWN_gc;
+
+	PORTA.DIR = nMask;
+	PORTA.OUTSET = nMask;
+
+	return n;
+}
+
+
+static void PollKeyboard()
+{
+	// A1 - S1-A2 S3-A4 S9-A5 S10-A6
+	// A3 - S0-A2 S2-A4 S4-A0 S6-A5 S7-A7
+	// A5 - S5-B0 S6-A3 S8-B1 S9-A1
+	uint16_t keys = 0;
+	uint8_t n1 = PollPins(1,3);
+	uint8_t n2 = PollPins(3,5);
+	uint16_t n3 = PollPins(5,1);
+	if ( n1 & _BV(2) ) keys |= _BV(1);
+	if ( n1 & _BV(4) ) keys |= _BV(3);
+	if ( n1 & _BV(5) ) keys |= _BV(9);
+	if ( n1 & _BV(6) ) keys |= _BV(10);
+
+	if ( n2 & _BV(2) ) keys |= _BV(0);
+	if ( n2 & _BV(4) ) keys |= _BV(2);
+	if ( n2 & _BV(0) ) keys |= _BV(4);
+	if ( n2 & _BV(5) ) keys |= _BV(6);
+	if ( n2 & _BV(7) ) keys |= _BV(7);
+
+	if ( n3 & _BV(8) ) keys |= _BV(5);
+	if ( n3 & _BV(3) ) keys |= _BV(6);
+	if ( n3 & _BV(9) ) keys |= _BV(8);
+	if ( n3 & _BV(1) ) keys |= _BV(9);
+
+	terminal.SendHex((int)keys);
+	terminal.SendCRLF();
+}
+
+
+
 int main(void)
 {
 	ioinit();
+
+	// debug 115200
+	int BSEL = 524;	//11;
+	int BSCALE = -5;	//-7;
+	terminal.Init( MAKE_XBAUD( BSCALE, BSEL )  );
+
 	sei();
 
+	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
 
 	long n = 0;
     while (1) 
     {
+		PollKeyboard();
 		ShowTime(n);
 		n+=60;
-		_delay_ms(100);
+		_delay_ms(1000);
+
+		terminal.Send("tick\r\n");
+
+		static uint16_t nLastEncoder = -1;
+		uint16_t nEncoder = TCC1.CNT;
+		if ( nEncoder != nLastEncoder )
+		{
+			nLastEncoder = nEncoder;
+			terminal.Send( "Encoder: ");
+			terminal.Send( (long)nEncoder );
+			terminal.SendCRLF();
+		}
     }
 }
 
