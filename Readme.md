@@ -46,6 +46,7 @@ I took a photo of the board, which was single sided, and traces the tracks...
 <p>
 Lines labeled A1 (purple), A3 (red), and A5 (blue) are the the common lines in a strobed layout, however, the same lines are 
 also sometimes used as inputs, eg when A1 is strobed and key 9 is pressed, A5 can be read.
+</p>
 
 ## Encoder
 <p>The am/fm tuning mechanism, is a disk type dial attached to a spindle, connected to the frequency display and variable capacitor via 
