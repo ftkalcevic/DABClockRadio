@@ -12,11 +12,16 @@
 #include "time.h"
 #include "ic2_7seg.h"
 #include "serial.h"
+#include "pictiva.h"
+
+#include "..\..\images\consolas.h"
+
 
 #define SLAVE_ADDR (0x70<<1)
 
 SevenSeg< CSerialTxn< CSerialTxnImpl< CMegaI2CE, 64, 8> >, SLAVE_ADDR> sevenSeg_I2C;
 IMPLEMENT_SERIAL_TXN_INTERRUPTS(E,sevenSeg_I2C)
+Pictiva display;
 
 //SevenSeg< CSerialTxn< CSerialTxnPolledImpl< CMegaI2CE > >, SLAVE_ADDR> sevenSeg_I2C;
 
@@ -33,7 +38,7 @@ static void InitI2C()
 static void Flash(bool bOn)
 {
 	// at the 1/2 second mark, turn off the colon (row 4)
-	uint8_t data[] = {SLAVE_ADDR, 4, (uint8_t)(bOn?0xFF:0) };
+	uint8_t data[] = {SLAVE_ADDR, 4, (uint8_t)(bOn?0xFF:0), 0 };
 	sevenSeg_I2C.SendTxn(data, countof(data));
 }
 
@@ -158,7 +163,7 @@ static void ioinit()
 	// RTC 
 	PR.PRGEN &= ~PR_RTC_bm;
 	CLK.RTCCTRL =  CLK_RTCSRC_TOSC_gc | CLK_RTCEN_bm;
-	RTC.CTRL = RTC_PRESCALER_DIV1_gc;
+	RTC.CTRL = RTC_PRESCALER_DIV256_gc;
 
 	//// Enable dfll32m
 	//OSC.XOSCCTRL = OSC_XOSCSEL_32KHz_gc;
@@ -186,7 +191,7 @@ static void ioinit()
 	PORTC.DIRSET = PIN3_bm;	// TX is output, RX is input
 	PORTC.OUTSET = PIN3_bm;	// set high
 
-    // Encoder 
+    // Encoder  - Using pins C0,C1 timer C1 and event channel 0
 	PR.PRGEN  &= ~PR_EVSYS_bm;
 	PR.PRPC &= ~PR_TC1_bm;
 
@@ -205,6 +210,9 @@ static void ioinit()
 	PORTCFG.MPCMASK = 0x3;
 	PORTB.PIN0CTRL = PORT_OPC_PULLDOWN_gc;
 	PORTB.DIRCLR = 3;
+
+	display.Init();
+	display.InitDisplay();
 
 	// Enable interrupt controller
 	PMIC.CTRL = PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm | PMIC_HILVLEN_bm;
@@ -273,15 +281,49 @@ int main(void)
 	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
 
-	long n = 0;
+	for ( uint16_t i=0; i < img_size; i++ )
+		display.sendData( pgm_read_byte(img+i) );
+
+	display.SetColumn(0);
+	display.SetRow(0);
+
+	uint32_t clock = 0;
+	uint16_t last_tick = 0;
+	bool bFlash = true;
+	ShowTime(clock);
     while (1) 
     {
-		PollKeyboard();
-		ShowTime(n);
-		n+=60;
-		_delay_ms(1000);
+		if ( ( RTC.STATUS & RTC_SYNCBUSY_bm ) == 0 )
+		{
+			uint16_t rtc = RTC.CNT;
+			uint16_t tick = rtc >> 2;
+			if ( tick != last_tick )
+			{
+				clock += (tick - last_tick);
+				last_tick = tick;
+				PollKeyboard();
+				if ( clock % 60 == 0 )
+					ShowTime(clock);
+				else
+					Flash(true);
+				bFlash = true;
+				terminal.Send("tick\r\n");
+				if ( clock % 60 == 0 )
+				{
+					if ( (clock / 60) & 1 )
+						display.displayPowerOff();
+					else
+						display.InitDisplay();
+				}
+			}
+			else if ( bFlash && (rtc & 2) != 0 )
+			{
+				Flash(false);
+				bFlash = false;
+			}
 
-		terminal.Send("tick\r\n");
+		}
+
 
 		static uint16_t nLastEncoder = -1;
 		uint16_t nEncoder = TCC1.CNT;
@@ -291,6 +333,18 @@ int main(void)
 			terminal.Send( "Encoder: ");
 			terminal.Send( (long)nEncoder );
 			terminal.SendCRLF();
+		}
+
+		{
+			static uint8_t i = 0;
+			uint16_t i0 = i>>1;
+			uint16_t c = i0 | (i << 5) | (i0 << 11);
+			display.sendData(c >> 8);
+			display.sendData(c & 0xFF);
+			i+=2;
+			if ( i > 0x3F )
+				i = 0;
+			_delay_ms(50);
 		}
     }
 }
