@@ -56,12 +56,22 @@ some string.  Through pure luck, I could replace the spindle with a mechanical e
 
 
 ## DAB module
+<p>
+I'm using <a href="http://www.monkeyboard.org/products/85-developmentboard/85-dab-dab-fm-digital-radio-development-board-pro">DAB+ FM Digital Radio Development Board Pro with SlideShow</a> from <a href="http://www.monkeyboard.org/">MonkeyBoard</a>
+as my audio source.  Not only is it a DAB and FM tuner, the DAB broadcast data also has carries the time, so I can use that to set the time on the clock.
+</p>
+<p>
+Out-of-the-box, the module is a USB device that simply provides a serial interface to the onboard Keystone T2_L4A_8650C.  
+For a microcontroller project, this gets in the way, so I took a soldering iron to the board and removed the interface chip, a PIC18F14K50.
+I also needed to break out the <a style="border-top: solid; border-top-color: black; border-top-width: 1px;">RESET</a> line of the tuner chip,
+which was available from pin 7 on the PIC footprint.
+</p>
 
 ## Other Keys and switches
 <p>The clock radio also has...</p>
-* 2 volume sliders (analog inputs)
-* 2, 3 position slide switches on the top
-* 2, 2 posotion slide switches on the left and right
+ * 2 volume sliders (analog inputs)
+ * 2, 3 position slide switches on the top
+ * 2, 2 posotion slide switches on the left and right
 
 <p>I need to work out how I am going to use them.</p>
 

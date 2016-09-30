@@ -157,6 +157,10 @@
     <Compile Include="main.cpp">
       <SubType>compile</SubType>
     </Compile>
+    <Compile Include="monkeyboarddab.h">
+      <SubType>compile</SubType>
+      <Link>monkeyboarddab.h</Link>
+    </Compile>
     <Compile Include="pictiva.h">
       <SubType>compile</SubType>
       <Link>pictiva.h</Link>

@@ -8,25 +8,31 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+#include <string.h>
 
 #include "time.h"
 #include "ic2_7seg.h"
 #include "serial.h"
 #include "pictiva.h"
+#include "monkeyboarddab.h"
 
 #include "..\..\images\consolas.h"
 
 
 #define SLAVE_ADDR (0x70<<1)
 
-SevenSeg< CSerialTxn< CSerialTxnImpl< CMegaI2CE, 64, 8> >, SLAVE_ADDR> sevenSeg_I2C;
+static SevenSeg< CSerialTxn< CSerialTxnImpl< CMegaI2CE, 64, 8> >, SLAVE_ADDR> sevenSeg_I2C;
 IMPLEMENT_SERIAL_TXN_INTERRUPTS(E,sevenSeg_I2C)
-Pictiva display;
+static CMonkeyBoardDAB<CSerial< CSerialImpl<CMegaSerialE0,64,64> > > dab;
+IMPLEMENT_SERIAL_INTERRUPTS( E0, dab )
+static Pictiva display;
 
 //SevenSeg< CSerialTxn< CSerialTxnPolledImpl< CMegaI2CE > >, SLAVE_ADDR> sevenSeg_I2C;
 
-CSerial< CSerialImpl<CMegaSerialC0,64,64> > terminal;
+static CSerial< CSerialImpl<CMegaSerialC0,64,64> > terminal;
 IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
+
+static uint32_t clock_secs = 0;
 
 
 static void InitI2C()
@@ -211,6 +217,12 @@ static void ioinit()
 	PORTB.PIN0CTRL = PORT_OPC_PULLDOWN_gc;
 	PORTB.DIRCLR = 3;
 
+	// USART E0 - DAB
+	PR.PRPE &= ~PR_USART0_bm;
+	PORTE.DIRSET = PIN3_bm;	// TX is output, RX is input
+	PORTE.PIN2CTRL = PORT_OPC_PULLUP_gc;
+	PORTE.OUTSET = PIN3_bm;	// set high
+
 	display.Init();
 	display.InitDisplay();
 
@@ -266,20 +278,284 @@ static void PollKeyboard()
 }
 
 
+static void PrintDABDetails()
+{
+	bool bClockSet = false;
+	{
+		if ( dab.RTC_GetClockStatus(bClockSet))
+		{
+			terminal.Send("Clock Status: ");
+			terminal.Send(bClockSet?"Set\r\n":"Unset\r\n");
+		}
+		else
+		{
+			terminal.Send("Failed to get clock status\r\n");
+		}
+	}
+
+	if ( bClockSet )
+	{
+		uint8_t day, month, hour, minute, second;
+		uint16_t year;
+		if ( dab.RTC_GetClock(day,month,year,hour,minute,second))
+		{
+			terminal.Send("Clock: ");
+			terminal.Send( day );
+			terminal.Send( '/' );
+			terminal.Send( month );
+			terminal.Send( '/' );
+			terminal.Send( (int)year );
+			terminal.Send( ' ' );
+			terminal.Send( hour );
+			terminal.Send( ':' );
+			terminal.Send( minute );
+			terminal.Send( ':' );
+			terminal.Send( second );
+			terminal.SendCRLF();
+
+			struct tm t;
+			t.tm_year = year-1900;
+			t.tm_mon = month;
+			t.tm_mday = day;
+			t.tm_hour = hour;
+			t.tm_min = minute;
+			t.tm_sec = second;
+
+
+			uint32_t seconds = mk_gmtime(&t);
+			if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
+			{
+				terminal.Send( "Setting time\r\n" );
+				clock_secs = seconds;
+				ShowTime(clock_secs);
+			}
+		}
+		else
+		{
+			terminal.Send("Failed to read clock\r\n");
+		}
+	}
+
+	{
+		uint16_t nPrograms;
+		if ( dab.STREAM_GetTotalProgram(nPrograms) )
+		{
+			terminal.Send( "Found ");
+			terminal.Send( (int)nPrograms );
+			terminal.Send( " DAB programs\r\n" );
+		}
+		else
+		{
+			terminal.Send( "Error reading DAB programs\r\n" );
+		}
+	}
+
+	DABPlayStatus nPlayStatus = DABPlayStatus::Stop;
+	{
+		if ( dab.STREAM_GetPlayStatus(nPlayStatus) )
+		{
+			terminal.Send( "DAB Play Status = ");
+			switch (nPlayStatus)
+			{
+				case DABPlayStatus::Playing: terminal.Send("Playing\r\n"); break;
+				case DABPlayStatus::Searching: terminal.Send("Searching\r\n"); break;
+				case DABPlayStatus::Tuning: terminal.Send("Tuning\r\n"); break;
+				case DABPlayStatus::Stop: terminal.Send("Stop\r\n"); break;
+				case DABPlayStatus::SortingChange: terminal.Send("Sorting Change\r\n"); break;
+				case DABPlayStatus::Reconfiguration: terminal.Send("Reconfiguration\r\n"); break;
+				default: terminal.Send((int)nPlayStatus); terminal.SendCRLF(); break;
+			}
+		}
+		else
+		{
+			terminal.Send( "Error reading DAB play status\r\n" );
+		}
+	}
+
+	{
+		DABPlayMode nPlayMode;
+		if ( dab.STREAM_GetPlayMode(nPlayMode) )
+		{
+			terminal.Send( "DAB Play Mode = ");
+			switch (nPlayMode)
+			{
+				case DABPlayMode::AM: terminal.Send("AM\r\n"); break;
+				case DABPlayMode::BEEPER: terminal.Send("BEEPER\r\n"); break;
+				case DABPlayMode::DAB: terminal.Send("DAB\r\n"); break;
+				case DABPlayMode::FM: terminal.Send("FM\r\n"); break;
+				case DABPlayMode::StreamStop: terminal.Send("Stream Stop\r\n"); break;
+				default: terminal.Send((int)nPlayMode); terminal.SendCRLF(); break;
+			}
+		}
+		else
+		{
+			terminal.Send( "Error reading DAB play status\r\n" );
+		}
+	}
+
+	{
+		uint32_t nIndex;
+		if ( dab.STREAM_GetPlayIndex(nIndex ) )
+		{
+			terminal.Send( "Play Index=" );
+			terminal.Send( (long)nIndex );
+			terminal.Send( "\r\n" );
+		}
+		else
+		{
+			terminal.Send( "Failed to read play index\r\n" );
+		}
+	}
+
+	if ( nPlayStatus != DABPlayStatus::Stop )
+	{
+		uint8_t nStrength; uint16_t nBitErrorRate;
+		if ( dab.STREAM_GetSignalStrength( nStrength, nBitErrorRate) )
+		{
+			terminal.Send( "Strength=" );
+			terminal.Send( (int)nStrength );
+			terminal.Send( ", Bit Error Rate=" );
+			terminal.Send( (int)nBitErrorRate );
+			terminal.Send( "\r\n" );
+		}
+		else
+		{
+			terminal.Send( "Failed to read signal strength\r\n" );
+		}
+	}
+	if ( nPlayStatus == DABPlayStatus::Playing )
+	{
+		char text[200];
+		if ( dab.STREAM_GetProgrammeText(text,sizeof(text)) )
+		{
+			terminal.Send("Program Text: ");
+			terminal.Send(text);
+			terminal.SendCRLF();
+		}
+		else
+		{
+			terminal.Send("Failed to read Program Text\r\n");
+		}
+	}
+
+	{
+		bool bEnabled;
+		if ( dab.RTC_GetSyncClockStatus(bEnabled))
+		{
+			terminal.Send("Clock Sync Status: ");
+			terminal.Send(bEnabled?"Enabled\r\n":"Disabled\r\n");
+		}
+		else
+		{
+			terminal.Send("Failed to get clock sync status\r\n");
+		}
+	}
+}
+
+static void PrintDABStations()
+{
+	uint16_t nPrograms;
+	if ( dab.STREAM_GetTotalProgram(nPrograms) )
+	{
+		terminal.Send( "Found ");
+		terminal.Send( (int)nPrograms );
+		terminal.Send( " DAB programs\r\n" );
+	}
+	else
+	{
+		terminal.Send( "Error reading DAB programs\r\n" );
+	}
+
+	for ( uint16_t i = 0; i < nPrograms; i++ )
+	{
+		char buf[120];
+		if ( dab.STREAM_GetProgrammeName( i, false, buf, sizeof(buf) ) )
+		{
+			terminal.Send( (int)i );
+			if ( i < 10 )
+			terminal.Send(' ');
+			terminal.Send(' ');
+			terminal.Send( buf );
+			for ( unsigned int j = 0; j < 9 - strlen(buf); j++)
+			terminal.Send(' ');
+
+			if ( dab.STREAM_GetProgrammeName( i, true, buf, sizeof(buf) ) )
+			{
+				terminal.Send( buf );
+				terminal.SendCRLF();
+			}
+		}
+	}
+}
+
+
 
 int main(void)
 {
 	ioinit();
 
 	// debug 115200
-	int BSEL = 524;	//11;
-	int BSCALE = -5;	//-7;
+	int BSEL = 524;
+	int BSCALE = -5;
 	terminal.Init( MAKE_XBAUD( BSCALE, BSEL )  );
+
+	// DBA chip is 57600
+	BSEL = 540;
+	BSCALE = -4;
+	dab.Init( MAKE_XBAUD( BSCALE, BSEL )  );
 
 	sei();
 
 	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
+
+	terminal.Send( "Resetting radio - ");
+	if ( dab.HardResetRadio() )
+		terminal.Send( "OK\r\n");
+	else
+		terminal.Send( "Fail\r\n");
+
+	terminal.Send( "Is DBA Ready?\r\n");
+
+	for(;;)//for ( uint8_t i = 0; i < 10; i++ )
+	{
+		if ( dab.SYSTEM_GetSysRdy() )
+		{
+			terminal.Send( "    Ready\r\n");
+
+			break;
+		}
+		else
+		{
+			terminal.Send( "    Problem!\r\n");
+		}
+		_delay_ms(500);
+	}
+
+
+	{
+		// 4=SEN, 30=Gold
+		if ( dab.STREAM_Play( DABPlayMode::DAB, 4 ) )
+		{
+			terminal.Send("Play OK\r\n");
+		}
+		else
+		{
+			terminal.Send("Play Failed\r\n");
+		}
+	}
+	if ( dab.STREAM_SetVolume( 4 ) )
+		terminal.Send("Volume Set\r\n");
+	else
+		terminal.Send("Failed to set Volume\r\n");
+
+	if ( dab.RTC_EnableSyncClock( true ) )
+		terminal.Send("Clock Sync Set\r\n");
+	else
+		terminal.Send("Failed to set Clock Sync\r\n");
+		
+	PrintDABDetails();
+	PrintDABStations();
 
 	for ( uint16_t i=0; i < img_size; i++ )
 		display.sendData( pgm_read_byte(img+i) );
@@ -287,10 +563,9 @@ int main(void)
 	display.SetColumn(0);
 	display.SetRow(0);
 
-	uint32_t clock = 0;
 	uint16_t last_tick = 0;
 	bool bFlash = true;
-	ShowTime(clock);
+	ShowTime(clock_secs);
     while (1) 
     {
 		if ( ( RTC.STATUS & RTC_SYNCBUSY_bm ) == 0 )
@@ -299,22 +574,23 @@ int main(void)
 			uint16_t tick = rtc >> 2;
 			if ( tick != last_tick )
 			{
-				clock += (tick - last_tick);
+				clock_secs += (tick - last_tick);
 				last_tick = tick;
 				PollKeyboard();
-				if ( clock % 60 == 0 )
-					ShowTime(clock);
+				if ( clock_secs % 60 == 0 )
+					ShowTime(clock_secs);
 				else
 					Flash(true);
 				bFlash = true;
 				terminal.Send("tick\r\n");
-				if ( clock % 60 == 0 )
+				if ( clock_secs % 60 == 0 )
 				{
-					if ( (clock / 60) & 1 )
+					if ( (clock_secs / 60) & 1 )
 						display.displayPowerOff();
 					else
 						display.InitDisplay();
 				}
+				PrintDABDetails();
 			}
 			else if ( bFlash && (rtc & 2) != 0 )
 			{
