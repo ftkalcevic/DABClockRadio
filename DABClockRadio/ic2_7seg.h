@@ -42,12 +42,15 @@ public:
 		static const uint8_t Display[] = { SLAVE_ADDR, HT16K33_BLINK_CMD | HT16K33_BLINK_DISPLAYON | (0 << 1) };
 		TSerialTxnImpl::SendTxn( Display, countof(Display) );
 
+		ClearDisplay();
+	}
+
+	void ClearDisplay()
+	{
 		TSerialTxnImpl::BeginTxn( SLAVE_ADDR );
 		TSerialTxnImpl::SendData( 0 );	// Row select
 		for ( int i = 0; i < 10; i++ )	
 			TSerialTxnImpl::SendData( 0 );	// Data;
 		TSerialTxnImpl::EndTxn();
-
 	}
-
 };

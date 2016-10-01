@@ -66,8 +66,8 @@ class Pictiva
 private:
 	void _send( uint8_t b )
 	{
-		PICTIVA_SPI.STATUS |= SPI_IF_bm;
-		uint8_t t = PICTIVA_SPI.DATA;
+//		PICTIVA_SPI.STATUS |= SPI_IF_bm;
+//		uint8_t t = PICTIVA_SPI.DATA;
 
 		PICTIVA_SPI.DATA = b;
 		while ( (PICTIVA_SPI.STATUS & SPI_IF_bm) == 0 )
@@ -86,6 +86,16 @@ private:
 		}
 
 		_send( cmd );
+	}
+
+	void _sendData( uint16_t cmd )
+	{
+		PICTIVA_D_C_PORT.OUTSET = PICTIVA_D_C;
+
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		_send( cmd >> 8 );
+		_send( cmd & 0xFF );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 
 public:
@@ -184,29 +194,41 @@ public:
 	//OK 0...255
 	void setContrast(uint8_t contrast)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+
 		send(_CMD_SETCRTSA,true);
 		send(contrast,true);
 		send(_CMD_SETCRTSB,true);
 		send(contrast,true);
 		send(_CMD_SETCRTSC,true);
 		send(contrast,true);
+
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 
 	//ok (0x0...0x15)(0..21)
 	void setBrightness(uint8_t val)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+
 		if (val > 15) val = 15;
 		send(_CMD_MASTCURR,true);
 		send(val,true);//1000xxxx
+
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 
 	void clearScreen(void)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+
 		send(_CMD_DRAW_CLRW,true);
 		send(0,true);
 		send(0,true);
 		send(OP_HDWMAXW,true);
 		send(63,true);
+
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 		
 		_delay_us(400);//increase if there's image flickering
 		//undocumented bug, after this command the SSD0332 needs some time to stabilize
@@ -219,6 +241,8 @@ public:
 
 	void displayMode(enum DispMode m) 
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+
 		switch(m)
 		{
 			case DispMode::ON:
@@ -241,23 +265,90 @@ public:
 				send(_CMD_DISPLAYALLOFF,true);
 				break;
 		}
+
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 	void sendData(uint8_t b)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send(b);
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
-	void SetColumn(uint8_t c)
+	void SetColumn(uint8_t start, uint8_t end = 95)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_SETCOLUMN, true );
-		send( 0, true );
-		send( 95, true );
-		
+		send( start, true );
+		send( end, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
-	void SetRow(uint8_t r)
+	void SetRow(uint8_t start, uint8_t end=48)
 	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_SETROW, true );
-		send( 0, true );
-		send( 47, true );
-
+		send( start, true );
+		send( end, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
+
+
+	void PutPixel( uint8_t c, uint8_t nPos )
+	{
+		static uint16_t pixel;
+		switch ( nPos )
+		{
+			case 0:	
+				pixel = (c>>1) << 11;
+				break;
+			case 1:
+				pixel |= c << 5;
+				break;
+			case 2:
+				pixel |= c>>1;
+				_sendData(pixel);
+				break;
+		}
+	}
+	void WriteText( const FontStruct * font, uint16_t x, uint8_t y, const char *s )
+	{
+		uint8_t slen = strlen(s);
+		uint16_t plen = slen * (font->cols + 1);
+
+		// Because each pixel is made up of 3 dots, we need to shift the physical start/end to 3 pixel boundaries.
+		div_t start = div(x,3);
+		div_t end = div(x+plen,3);
+
+		// bounding rectangle is 
+		SetRow( y, y+font->rows-1 );
+		SetColumn( start.quot, end.quot + (end.rem ? 1 : 0) - 1 );
+
+		// output the data into the block
+		for ( uint8_t row = 0; row < font->rows; row++ )
+		{
+			const char *ptr = s;
+			uint8_t p = 0;
+			for ( ; p < start.rem; p++ )
+				PutPixel( 0, p );
+			while ( *ptr )
+			{
+				uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
+				for ( uint8_t c = 0; c < font->cols; c++ )
+				{
+					PutPixel( (bits & _BV(7-c)) ? 0x3F : 0, p );
+					p++;
+					if (p==3) p = 0;
+				}
+				PutPixel( 0, p );
+				p++;
+				if (p==3) p = 0;
+				ptr++;
+			}
+			for ( int8_t i = end.rem; i >= 0 ; i-- )
+			{
+				PutPixel( 0, p );
+				p++;
+			}
+		}
+	}
+
 };

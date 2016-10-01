@@ -7,8 +7,11 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/pgmspace.h>
 #include <util/delay.h>
 #include <string.h>
+
+#include "..\images\font.h"
 
 #include "time.h"
 #include "ic2_7seg.h"
@@ -16,7 +19,8 @@
 #include "pictiva.h"
 #include "monkeyboarddab.h"
 
-#include "..\..\images\consolas.h"
+//#include "..\..\images\consolas.h"
+
 
 
 #define SLAVE_ADDR (0x70<<1)
@@ -33,7 +37,9 @@ static CSerial< CSerialImpl<CMegaSerialC0,64,64> > terminal;
 IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
 
 static uint32_t clock_secs = 0;
-
+static bool bClockInitialised=false;
+static uint16_t nLastPlayedProgram = 4;
+static uint32_t radioTimer;
 
 static void InitI2C()
 {
@@ -41,7 +47,12 @@ static void InitI2C()
 	sevenSeg_I2C.Init();
 }
 
-static void Flash(bool bOn)
+static void ClearDisplay()
+{
+	sevenSeg_I2C.ClearDisplay();
+}
+
+static void FlashColon(bool bOn)
 {
 	// at the 1/2 second mark, turn off the colon (row 4)
 	uint8_t data[] = {SLAVE_ADDR, 4, (uint8_t)(bOn?0xFF:0), 0 };
@@ -125,7 +136,17 @@ static void ShowTime( long nSeconds )
 	sevenSeg_I2C.SendTxn( (uint8_t *)&data, sizeof(data) );
 }
 
-
+static void UpdateTime( struct tm &t )
+{
+	uint32_t seconds = mk_gmtime(&t);
+	if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
+	{
+		terminal.Send( "Setting time\r\n" );
+		clock_secs = seconds;
+		ShowTime(clock_secs);
+		bClockInitialised = true;
+	}
+}
 
 
 static volatile uint32_t ms;
@@ -235,7 +256,6 @@ static uint16_t PollPins( uint8_t pin, uint8_t next_pin )
 	uint16_t n = (PORTA.IN & ~_BV(pin)) | ((PORTB.IN & 3) << 8);
 
 	uint8_t nMask = 1 << next_pin;
-	uint8_t nNotMask = ~nMask;
 
 	// Keypad keys A0-8 B0-1
 	PORTCFG.MPCMASK = 0xFF;
@@ -321,14 +341,7 @@ static void PrintDABDetails()
 			t.tm_min = minute;
 			t.tm_sec = second;
 
-
-			uint32_t seconds = mk_gmtime(&t);
-			if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
-			{
-				terminal.Send( "Setting time\r\n" );
-				clock_secs = seconds;
-				ShowTime(clock_secs);
-			}
+			UpdateTime( t );
 		}
 		else
 		{
@@ -489,6 +502,286 @@ static void PrintDABStations()
 }
 
 
+static enum class RadioState: uint8_t
+{
+	Init,
+	WaitForReply,
+	Idle,
+	InitStartUpTasks,
+	StartUpTasks,
+	StartUpTasksPause,
+	WaitForTaskReply
+} radioState = RadioState::Init, successState, failState;
+static int8_t task;
+
+void SetWaitForReply( RadioState success, RadioState failure)
+{
+	radioState = RadioState::WaitForReply;
+	successState = success;
+	failState = failure;
+}
+
+enum StartUpTasks
+{
+	SetVolume0 = 0,
+	EnableSyncClock,
+	PlayProgramForTime,
+	GetProgramCount,
+	GetPrograms,
+	GetSyncClockStatus,
+	GetClockStatus,
+	GetClock,
+	StopPlaying,
+	PowerOff,
+	StartUpTasksMax
+};
+
+struct StartupTaskFuncs
+{
+	bool (*init)();
+	bool (*check)(AsyncReturnCode ret);
+
+} StartUpTaskList[StartUpTasksMax];
+
+bool funcSetVolume0_init() 
+{
+	dab.STREAM_SetVolume_Async(0, ms );
+	return true;
+} 
+
+bool ack_check(AsyncReturnCode ret) 
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+		return true;
+	else
+		return false;
+} 
+
+bool funcEnableSyncClock_init() 
+{
+	dab.RTC_EnableSyncClock_Async(1, ms );
+	return true;
+}
+
+bool funcGetSyncClockStatus_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		bool bSet = dab.MsgBuffer()[0] != 0;
+		return bSet;
+	}
+	else
+	return false;
+}
+
+bool funcGetSyncClockStatus_init()
+{
+	dab.RTC_GetSyncClockStatus_Async( ms );
+	return true;
+}
+
+bool funcGetClockStatus_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		bool bEnabled = dab.MsgBuffer()[0] != 0;
+		return bEnabled;
+	}
+	else
+		return false;
+}
+
+bool funcGetClockStatus_init()
+{
+	dab.RTC_GetClockStatus_Async( ms );
+	return true;
+}
+
+
+bool funcGetClock_init()
+{
+	dab.RTC_GetClock_Async(ms);
+	return true;
+}
+
+bool funcGetClock_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		uint8_t *input = dab.MsgBuffer();
+
+		struct tm t;
+		t.tm_year = input[6] + 2000 - 1900;
+		t.tm_mon = input[5];
+		t.tm_mday = input[3];
+		t.tm_hour = input[2];
+		t.tm_min = input[1];
+		t.tm_sec = input[0];
+
+		UpdateTime( t );
+
+		return true;
+	}
+	else
+		return false;	
+}
+
+static uint16_t nPrograms;
+static uint16_t nProgramIdx;
+
+bool funcGetProgramCount_init()
+{
+	dab.STREAM_GetTotalProgram_Async(ms);
+	return true;
+}
+
+bool funcGetProgramCount_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		nPrograms =  dab.MsgBuffer()[3] | ( dab.MsgBuffer()[2]<<8);	// use only the 2 low bytes.
+		nProgramIdx = 0;
+		return true;
+	}
+	else
+		return false;
+}
+
+char namebuf[20];
+bool funcGetPrograms_init()
+{
+	dab.STREAM_GetProgrammeName_Async(nProgramIdx, true, namebuf,sizeof(namebuf),ms);
+	return true;
+}
+
+bool funcGetPrograms_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		for ( uint16_t i = 1; i < dab.MsgLen(); i+=2 )
+			terminal.Send( namebuf[i] );
+		terminal.SendCRLF();
+
+		nProgramIdx++;
+		if ( nProgramIdx < nPrograms )
+			return false;
+		else
+			return true;
+	}
+	else
+		return false;
+}
+
+bool funcPlayProgramForTime_init()
+{
+	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
+	return true;
+}
+
+bool funcStopPlaying_init()
+{
+	dab.STREAM_Stop_Async(ms);
+	return true;
+}
+
+
+bool funcPowerOff_init()
+{
+	dab.PowerOff();
+	return true;
+}
+
+void InitStartUpTasks()
+{
+	memset( StartUpTaskList, 0, sizeof(StartUpTaskList) );
+	StartUpTaskList[SetVolume0].init = funcSetVolume0_init; StartUpTaskList[SetVolume0].check = ack_check;
+	StartUpTaskList[EnableSyncClock].init = funcEnableSyncClock_init; StartUpTaskList[EnableSyncClock].check = ack_check;
+	StartUpTaskList[GetSyncClockStatus].init = funcGetSyncClockStatus_init; StartUpTaskList[GetSyncClockStatus].check = funcGetSyncClockStatus_check;
+	StartUpTaskList[GetClockStatus].init = funcGetClockStatus_init; StartUpTaskList[GetClockStatus].check = funcGetClockStatus_check;
+	StartUpTaskList[GetClock].init = funcGetClock_init; StartUpTaskList[GetClock].check = funcGetClock_check;
+	StartUpTaskList[GetProgramCount].init = funcGetProgramCount_init; StartUpTaskList[GetProgramCount].check = funcGetProgramCount_check;
+	StartUpTaskList[GetPrograms].init = funcGetPrograms_init; StartUpTaskList[GetPrograms].check = funcGetPrograms_check;
+	StartUpTaskList[PlayProgramForTime].init = funcPlayProgramForTime_init; StartUpTaskList[PlayProgramForTime].check = ack_check;
+	StartUpTaskList[StopPlaying].init = funcStopPlaying_init; StartUpTaskList[StopPlaying].check = ack_check;
+	StartUpTaskList[PowerOff].init = funcPowerOff_init; //StartUpTaskList[PowerOff].check = NULL;
+}
+
+int8_t NextTask(bool bPassed)
+{
+	if ( bPassed )
+		StartUpTaskList[task].init = NULL;
+
+	for ( uint8_t i = 0; i < StartUpTasksMax; i++ )
+	{
+		task++;
+		if ( task >= StartUpTasksMax )
+			task = 0;
+		if ( StartUpTaskList[task].init != NULL )
+			return task;
+	}
+	return -1;
+}
+
+void DoDAB()
+{
+	AsyncReturnCode ret = dab.Async( ms );
+	if ( dab.isIdle() )
+	{
+		switch ( radioState )
+		{
+			case RadioState::Init:
+				dab.SYSTEM_GetSysRdy_Async(ms,500);
+				SetWaitForReply( RadioState::InitStartUpTasks, RadioState::Init );
+				//SetWaitForReply( RadioState::Idle, RadioState::Init );
+				break;
+
+			case RadioState::WaitForReply:
+				if ( ret == AsyncReturnCode::ReplAck )
+					radioState = successState;
+				else if ( ret != AsyncReturnCode::OK )
+					radioState = failState;
+				break;
+
+			case RadioState::InitStartUpTasks:
+				InitStartUpTasks();
+				task = 0;
+				radioState = RadioState::StartUpTasks;
+				// fall through
+
+			case RadioState::StartUpTasks:
+				// Next task
+				if ( StartUpTaskList[task].init() )
+					radioState = RadioState::WaitForTaskReply;
+				break;
+				
+			case RadioState::WaitForTaskReply:
+			{
+				if ( StartUpTaskList[task].check == NULL || StartUpTaskList[task].check(ret) )
+				{
+					task = NextTask(true);
+					if ( task < 0 )
+						radioState = RadioState::Idle;	// Done.
+					else
+						radioState = RadioState::StartUpTasks;
+				}
+				else
+				{
+					radioState = RadioState::StartUpTasksPause;
+					radioTimer = ms + 500;
+				}
+				break;
+			}
+
+			case RadioState::StartUpTasksPause:
+				if ( (int32_t)(ms - radioTimer) <= 0 )
+					radioState = RadioState::StartUpTasks;
+				break;
+
+			case RadioState::Idle:
+				break;
+		}
+	}
+}
 
 int main(void)
 {
@@ -510,58 +803,36 @@ int main(void)
 	sevenSeg_I2C.Start();
 
 	terminal.Send( "Resetting radio - ");
-	if ( dab.HardResetRadio() )
-		terminal.Send( "OK\r\n");
-	else
-		terminal.Send( "Fail\r\n");
+	dab.AsyncStart();
 
-	terminal.Send( "Is DBA Ready?\r\n");
-
-	for(;;)//for ( uint8_t i = 0; i < 10; i++ )
-	{
-		if ( dab.SYSTEM_GetSysRdy() )
-		{
-			terminal.Send( "    Ready\r\n");
-
-			break;
-		}
-		else
-		{
-			terminal.Send( "    Problem!\r\n");
-		}
-		_delay_ms(500);
-	}
-
-
-	{
-		// 4=SEN, 30=Gold
-		if ( dab.STREAM_Play( DABPlayMode::DAB, 4 ) )
-		{
-			terminal.Send("Play OK\r\n");
-		}
-		else
-		{
-			terminal.Send("Play Failed\r\n");
-		}
-	}
-	if ( dab.STREAM_SetVolume( 4 ) )
-		terminal.Send("Volume Set\r\n");
-	else
-		terminal.Send("Failed to set Volume\r\n");
-
-	if ( dab.RTC_EnableSyncClock( true ) )
-		terminal.Send("Clock Sync Set\r\n");
-	else
-		terminal.Send("Failed to set Clock Sync\r\n");
-		
-	PrintDABDetails();
-	PrintDABStations();
-
-	for ( uint16_t i=0; i < img_size; i++ )
-		display.sendData( pgm_read_byte(img+i) );
+	//for ( uint16_t i=0; i < img_size; i++ )
+		//display.sendData( pgm_read_byte(img+i) );
 
 	display.SetColumn(0);
 	display.SetRow(0);
+
+	//display.sendData(0);
+	//display.sendData(0);
+	//display.sendData(0);
+	//display.SetRow(0,10-1);
+	//display.SetColumn(0,3-1);
+	//for ( int i = 0; i < 10; i++)
+	//for ( int j = 0; j < 3; j++)
+	//{
+		//uint16_t n = i%3 == 0 ? 0x8000 : i%3 == 1 ? 0x0400 : 0x0010;
+		////uint16_t n = 0x0400;
+		//display.sendData(n >> 8);
+		//display.sendData(n & 0xFF);
+	//}
+	//display.sendData(0xFF);
+
+//	display.displayPowerOff();
+//	display.WriteText( &font_6x13, 3, 1, "|" );
+	display.WriteText( &font_6x13, 0, 0, "Initialising..." );
+	display.WriteText( &font_6x13, 1, 11, "Initialising..." );
+	for ( int i = 188; i >= 0; i--)
+		display.WriteText( &font_6x13, i, 22, "Initialising..." );
+
 
 	uint16_t last_tick = 0;
 	bool bFlash = true;
@@ -577,29 +848,48 @@ int main(void)
 				clock_secs += (tick - last_tick);
 				last_tick = tick;
 				PollKeyboard();
-				if ( clock_secs % 60 == 0 )
+				if ( !bClockInitialised )
+				{
 					ShowTime(clock_secs);
+				}
 				else
-					Flash(true);
+				{
+					if ( clock_secs % 60 == 0 )
+						ShowTime(clock_secs);
+					else
+						FlashColon(true);
+				}
 				bFlash = true;
 				terminal.Send("tick\r\n");
-				if ( clock_secs % 60 == 0 )
-				{
-					if ( (clock_secs / 60) & 1 )
-						display.displayPowerOff();
-					else
-						display.InitDisplay();
-				}
-				PrintDABDetails();
+				//if ( clock_secs % 60 == 0 )
+				//{
+					//if ( (clock_secs / 60) & 1 )
+						//display.displayPowerOff();
+					//else
+						//display.InitDisplay();
+				//}
+				
+				//if ( clock_secs % 30 == 0 )
+				//{
+					//if ( radioState == RadioState::Idle && dab.isIdle() )
+					//{
+						//dab.RTC_EnableSyncClock(true);
+						//dab.STREAM_Play( DABPlayMode::DAB, 4 );
+//
+						//PrintDABDetails();								
+					//}
+				//}
 			}
 			else if ( bFlash && (rtc & 2) != 0 )
 			{
-				Flash(false);
+				if ( !bClockInitialised )
+					ClearDisplay();
+				else
+					FlashColon(false);
 				bFlash = false;
 			}
 
 		}
-
 
 		static uint16_t nLastEncoder = -1;
 		uint16_t nEncoder = TCC1.CNT;
@@ -611,17 +901,19 @@ int main(void)
 			terminal.SendCRLF();
 		}
 
-		{
-			static uint8_t i = 0;
-			uint16_t i0 = i>>1;
-			uint16_t c = i0 | (i << 5) | (i0 << 11);
-			display.sendData(c >> 8);
-			display.sendData(c & 0xFF);
-			i+=2;
-			if ( i > 0x3F )
-				i = 0;
-			_delay_ms(50);
-		}
+		//if ( ms % 50 == 0)
+		//{
+			//static uint8_t i = 0;
+			//uint16_t i0 = i>>1;
+			//uint16_t c = i0 | (i << 5) | (i0 << 11);
+			//display.sendData(c >> 8);
+			//display.sendData(c & 0xFF);
+			//i+=2;
+			//if ( i > 0x3F )
+				//i = 0;
+		//}
+
+		DoDAB();
     }
 }
 
@@ -629,10 +921,13 @@ int main(void)
 
 /*
 
-70 21
-70 E4
-70 81
-70 00 x 11
-70 00 06 00 5B 00 FF 00 3F 00 3F 00
+Start up
+- EnableSyncClock.
+- Read programs
+- Set clock time
+	- appears you can only get time when you are playing
+	- Play a channel
+	- Get time.
+	- stop playing when we've got time.  We can abort this last step if we start playing.
 
 */

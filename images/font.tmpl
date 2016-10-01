@@ -1,0 +1,61 @@
+$(start_block_header)
+/*******************************************************************************
+* $(doc_data_type)
+* filename: $(doc_filename)
+* name: $(doc_name)
+* family: $(fnt_family)
+* size: $(fnt_size)
+* style: $(fnt_style)
+* included characters: $(fnt_string)
+* antialiasing: $(fnt_antialiasing)
+* type: $(fnt_width_type)
+* encoding: $(fnt_encoding)
+* unicode bom: $(fnt_use_bom)
+*
+* preset name: $(out_preset_name)
+* data block size: $(img_data_block_size) bit(s), uint$(img_data_block_size)_t
+* RLE compression enabled: $(img_rle)
+* conversion type: $(pre_conv_type), $(pre_mono_type) $(pre_mono_edge)
+* bits per pixel: $(out_bpp)
+*
+* preprocess:
+*  main scan direction: $(pre_scan_main)
+*  line scan direction: $(pre_scan_sub)
+*  inverse: $(pre_inverse)
+*******************************************************************************/
+
+#include <avr/pgmspace.h>
+#include "font.h"
+
+$(end_block_header)
+
+/*
+
+img_data_block_size = $(img_data_block_size)
+out_images_count = $(out_images_count)
+out_image_height=$(out_image_height)
+out_image_width=$(out_image_width)
+out_images_count=$(out_images_count)
+out_images_max_height=$(out_images_max_height)
+out_images_max_width=$(out_images_max_width)
+out_preset_name=$(out_preset_name)
+
+*/
+
+// start array
+
+static const uint8_t _$(doc_name_ws)[] PROGMEM = {
+
+$(start_block_images_table)
+    $(out_image_data)$(comma)	// character: '$(out_char_text)'
+$(end_block_images_table)
+
+};
+
+const struct FontStruct font_$(doc_name_ws) = {
+	.first_char = $(out_images_min_char_code),
+	.last_char = $(out_images_max_char_code),
+	.rows = $(out_image_height),
+	.cols = $(out_images_max_width),
+	.data = _$(doc_name_ws)
+};
