@@ -415,6 +415,16 @@ public:
 		}
 	}
 
+	void Send( uint16_t v )
+	{
+		if ( bEnabled )
+		{
+			char s[7];
+			itoa( v, s, 10 );
+			Send( s );
+		}
+	}
+
 	void Send( long v )
 	{
 		if ( bEnabled )

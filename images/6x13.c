@@ -6,7 +6,7 @@
 * family: 6X13
 * size: 6
 * style: Medium
-* included characters:  !"#$%&'()*+,-./0123456789:;<=>?\x0040ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+* included characters:  !"#$%&'()*+,-./0123456789:;<=>?\x0040ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x007f
 * antialiasing: no
 * type: monospaced
 * encoding: ASMO-708
@@ -32,10 +32,10 @@
 /*
 
 img_data_block_size = 8
-out_images_count = 95
+out_images_count = 96
 out_image_height=<value not defined>
 out_image_width=<value not defined>
-out_images_count=95
+out_images_count=96
 out_images_max_height=11
 out_images_max_width=5
 out_preset_name=Monochrome
@@ -1185,14 +1185,26 @@ static const uint8_t _6x13[] PROGMEM = {
     0x00, 
     0x00, 
     0x00, 
-    0x00	// character: '~'
+    0x00,	// character: '~'
+
+    0x00, 
+    0x00, 
+    0x00, 
+    0x70, 
+    0xf8, 
+    0xf8, 
+    0xf8, 
+    0x70, 
+    0x00, 
+    0x00, 
+    0x00	// character: '\x007f'
 
 
 };
 
 const struct FontStruct font_6x13 = {
 	.first_char = 32,
-	.last_char = 126,
+	.last_char = 127,
 	.rows = 11,
 	.cols = 5,
 	.data = _6x13

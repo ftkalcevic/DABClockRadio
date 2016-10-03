@@ -309,7 +309,9 @@ public:
 				break;
 		}
 	}
-	void WriteText( const FontStruct * font, uint16_t x, uint8_t y, const char *s )
+
+	// Write a line of text.  No clipping or boundary checking.  Monospace.
+	void WriteText( const FontStruct * font, uint16_t x, uint8_t y, const char *s, uint8_t colour = 0x3F )
 	{
 		uint8_t slen = strlen(s);
 		uint16_t plen = slen * (font->cols + 1);
@@ -318,23 +320,27 @@ public:
 		div_t start = div(x,3);
 		div_t end = div(x+plen,3);
 
-		// bounding rectangle is 
+		// bounding rectangle
 		SetRow( y, y+font->rows-1 );
 		SetColumn( start.quot, end.quot + (end.rem ? 1 : 0) - 1 );
 
-		// output the data into the block
+		// output the data into the block, row by row, letting the graphics controller shift lines.
 		for ( uint8_t row = 0; row < font->rows; row++ )
 		{
 			const char *ptr = s;
 			uint8_t p = 0;
+
+			// Leading pixels
 			for ( ; p < start.rem; p++ )
 				PutPixel( 0, p );
+
+			// text
 			while ( *ptr )
 			{
 				uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
 				for ( uint8_t c = 0; c < font->cols; c++ )
 				{
-					PutPixel( (bits & _BV(7-c)) ? 0x3F : 0, p );
+					PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
 					p++;
 					if (p==3) p = 0;
 				}
@@ -343,6 +349,8 @@ public:
 				if (p==3) p = 0;
 				ptr++;
 			}
+
+			// trailing pixels
 			for ( int8_t i = end.rem; i >= 0 ; i-- )
 			{
 				PutPixel( 0, p );
@@ -351,4 +359,102 @@ public:
 		}
 	}
 
+	void WriteText( const PropFontStruct * font, uint16_t x, uint8_t y, const char *s, uint8_t colour = 0x3F )
+	{
+		uint8_t slen = strlen(s);
+
+		// pixel length
+		uint16_t plen = 0;
+		for ( uint8_t i = 0; i < slen; i++ )
+		{
+			const PropCharStruct *p = font->chars;
+			p += (s[i] - font->first_char);
+			uint8_t width = pgm_read_byte( &(p->width) );
+			plen += width + 1;
+		}
+
+		if ( x + plen > OP_SCREENW )
+			plen = OP_SCREENW - x;
+
+		// Because each pixel is made up of 3 dots, we need to shift the physical start/end to 3 pixel boundaries.
+		div_t start = div(x,3);
+		div_t end = div(x+plen,3);
+
+		// bounding rectangle
+		SetRow( y, y+font->rows-1 );
+		SetColumn( start.quot, end.quot + (end.rem ? 1 : 0) - 1 );
+
+		// output the data into the block, row by row, letting the graphics controller shift lines.
+		for ( uint8_t row = 0; row < font->rows; row++ )
+		{
+			const char *ptr = s;
+			uint8_t p = 0;
+			uint16_t px = x;
+
+			// Leading pixels
+			for ( ; p < start.rem; p++ )
+			{
+				PutPixel( 0, p );
+				px++;
+			}
+
+			// text
+			while ( *ptr && px < OP_SCREENW )
+			{
+				const PropCharStruct *pchar = font->chars;
+				pchar += (*ptr - font->first_char);
+			 
+				uint8_t width = pgm_read_byte( &(pchar->width) );
+				const uint8_t * PROGMEM data = (const uint8_t PROGMEM *)pgm_read_ptr( &(pchar->data) );
+
+				for ( uint8_t c = 0; c < width && px < OP_SCREENW; c++ )
+				{
+					uint8_t colour = pgm_read_byte( data + width * row + c );
+					PutPixel( colour, p );
+					px++;
+					p++;
+					if (p==3) p = 0;
+				}
+				if ( px < OP_SCREENW )
+				{
+					PutPixel( 0, p );
+					px++;
+					p++;
+					if (p==3) p = 0;
+				}
+				ptr++;
+			}
+
+			// trailing pixels
+			for ( int8_t i = end.rem; i >= 0 && px < OP_SCREENW; i-- )
+			{
+				PutPixel( 0, p );
+				p++;
+				px++;
+			}
+		}
+	}
+
+	void Copy( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye,  uint16_t xd, uint8_t yd )
+	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		send( _CMD_DRAW_COPY, true );
+		send( xs / 3, true );
+		send( ys, true );
+		send( xe / 3, true );
+		send( ye, true );
+		send( xd / 3, true );
+		send( yd, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+	}
+	void ClearWindow( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye )
+	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		send( _CMD_DRAW_CLRW, true );
+		send( xs / 3, true );
+		send( ys, true );
+		send( xe / 3, true );
+		send( ye, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+	}
 };

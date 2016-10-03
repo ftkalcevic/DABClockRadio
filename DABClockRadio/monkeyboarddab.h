@@ -19,7 +19,7 @@ enum class DABCmdType: uint8_t
 };
 
 
-enum class DABReponseType: uint8_t
+enum class DABResponseType: uint8_t
 {
 	Ack = 0,
 };
@@ -147,13 +147,27 @@ enum class DABNotification: uint16_t
 	ScanFrequency	= 0x40
 };
 
+
+enum class DABNotificationType: uint8_t
+{
+	ScanTerminate = 0,
+	NewProgrammeText = 1,
+	DABReconfig = 2,
+	DABSortingChange = 3,
+	RDSRawData = 4,
+	NewDLSCmd = 5,
+	ScanFrequency = 6,
+	Max = ScanFrequency 
+};
+
 enum class AsyncReturnCode: uint8_t
 {
 	OK,
 	ReplyTimedOut,
 	ReplAck,
 	ReplyNack,
-	Error
+	Error,
+	Notification
 };
 
 
@@ -399,6 +413,12 @@ public:
 		}
 	}
 
+	void STREAM_GetPlayStatus_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetPlayStatus );
+		WaitForReply_Async( DABStreamCmd::GetPlayStatus, sn, clock+timeout, 1 );
+	}
+
 	bool STREAM_GetPlayStatus( DABPlayStatus &status )
 	{
 		uint8_t sn = SendCommand( DABStreamCmd::GetPlayStatus );
@@ -415,6 +435,12 @@ public:
 		{
 			return ErrorCleanup();
 		}
+	}
+
+	void STREAM_GetPlayMode_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetPlayMode );
+		WaitForReply_Async( DABStreamCmd::GetPlayMode, sn, clock+timeout, 1 );
 	}
 
 	bool STREAM_GetPlayMode( DABPlayMode &mode )
@@ -454,6 +480,12 @@ public:
 		}
 	}
 	
+	void STREAM_GetSignalStrength_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetSignalStrength );
+		WaitForReply_Async( DABStreamCmd::GetSignalStrength, sn, clock+timeout, 3 );
+	}
+
 	bool STREAM_GetSignalStrength(uint8_t &nStrength, uint16_t &nBitErrorRate )
 	{
 		uint8_t sn = SendCommand( DABStreamCmd::GetSignalStrength );
@@ -541,7 +573,7 @@ public:
 		out[4] = bFullName ? 1 :0;
 		uint8_t sn = SendCommand( DABStreamCmd::GetProgrammeName, out, sizeof(out) );
 
-		WaitForReply_Async( DABStreamCmd::GetProgrammeName, sn, clock+timeout, -1, (uint8_t *)buf, len );
+		WaitForReply_Async( DABStreamCmd::GetProgrammeName, sn, clock+timeout, -1, (uint8_t *)buf, len, true );
 	}
 
 	bool STREAM_GetProgrammeName( uint32_t nIndex, bool bFullName, char *buf, int len )
@@ -555,6 +587,12 @@ public:
 		uint8_t sn = SendCommand( DABStreamCmd::GetProgrammeName, out, sizeof(out) );
 
 		return RetreiveText( DABStreamCmd::GetProgrammeName, sn, buf, len );
+	}
+
+	void STREAM_GetProgrammeText_Async(char *buf, int len, const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetProgrammeText );
+		WaitForReply_Async(DABStreamCmd::GetProgrammeText, sn, clock+timeout, -1, (uint8_t *)buf, len, true );
 	}
 
 	bool STREAM_GetProgrammeText(char *buf, int len )
@@ -590,6 +628,14 @@ public:
 			return ErrorCleanup();
 		}
 	}
+
+
+	void STREAM_GetPlayIndex_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetPlayIndex );
+		WaitForReply_Async( DABStreamCmd::GetPlayIndex, sn, clock+timeout, 4 );
+	}
+
 
 	void RTC_GetClock_Async( uint32_t clock, uint16_t timeout = 250 )
 	{
@@ -694,6 +740,15 @@ public:
 		}
 	}
 
+	void NOTIFY_SetNotification_Async( DABNotification n, const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t data[2];
+		data[0] = (uint16_t)n >> 8;
+		data[1] = (uint16_t)n & 0xFF;
+		uint8_t sn = SendCommand( DABNotificationCmd::SetNotification, data, sizeof(data) );
+		WaitForReply_Async( DABNotificationCmd::SetNotification, sn, clock+timeout );
+	}
+
 	bool NOTIFY_SetNotification( DABNotification n )
 	{
 		uint8_t data[2];
@@ -736,6 +791,9 @@ public:
 private:
 	void DABOff()
 	{
+		DBA_MUTE_PORT.DIRSET = DBA_MUTE;
+		DABMute(true);
+
 		DBA_RESET_PORT.DIRSET = DBA_RESET;
 		DBA_RESET_PORT.OUTCLR = DBA_RESET;	// Reset
 
@@ -753,6 +811,14 @@ private:
 		DBA_RESET_PORT.OUTSET = DBA_RESET; // Reset off
 	}
 
+	void DABMute( bool bMute )
+	{
+		if ( bMute )
+			DBA_MUTE_PORT.OUTSET = DBA_MUTE;
+		else
+			DBA_MUTE_PORT.OUTCLR = DBA_MUTE;
+	}
+
 	enum class DABState: uint8_t
 	{
 		Initialise,
@@ -762,17 +828,20 @@ private:
 		WaitForStart,
 		WaitForReply,
 		WaitForIdle,
+		WaitForNotification,
 		Idle,
-		Off
+		Off = DABState::Idle
 	} state, nextState;
 	uint32_t timer;
 	int8_t	wait_for_msgLen;
 	uint8_t wait_byte_count;
-	uint8_t wait_header[10];	// a bit bigger than the 6 for a header as we use this a small msg buffer.
+	uint8_t wait_header[0x10];	// a bit bigger than the 6 for a header as we use this a small msg buffer.
+	uint8_t header[6];
 	uint8_t *wait_output_buffer;
 	uint8_t wait_output_buffer_len;
 	uint16_t wait_body_length;
 	uint16_t wait_body_count;
+	bool isUnicode;
 
 	void WaitForState( DABState nextState, uint32_t time )
 	{
@@ -781,19 +850,24 @@ private:
 		this->state = DABState::TimedWait;
 	}
 
-	void WaitForReply_Async( DABStreamCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0 )
+	
+	void WaitForReply_Async( DABNotificationCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0, bool bUnicode = false )
 	{
-		WaitForReply_Async( (uint8_t)DABCmdType::Stream, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len );
+		WaitForReply_Async( (uint8_t)DABCmdType::Notification, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len, bUnicode );
 	}
-	void WaitForReply_Async( DABRTCCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0 )
+	void WaitForReply_Async( DABStreamCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0, bool bUnicode = false )
 	{
-		WaitForReply_Async( (uint8_t)DABCmdType::_RTC, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len );
+		WaitForReply_Async( (uint8_t)DABCmdType::Stream, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len, bUnicode );
 	}
-	void WaitForReply_Async( DABSystemCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0 )
+	void WaitForReply_Async( DABRTCCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0, bool bUnicode = false )
 	{
-		WaitForReply_Async( (uint8_t)DABCmdType::System, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len );
+		WaitForReply_Async( (uint8_t)DABCmdType::_RTC, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len, bUnicode );
 	}
-	void WaitForReply_Async( uint8_t nCmdType, uint8_t nCmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0 )
+	void WaitForReply_Async( DABSystemCmd cmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0, bool bUnicode = false )
+	{
+		WaitForReply_Async( (uint8_t)DABCmdType::System, (uint8_t)cmd, sn, timeout, msgLen, output_buffer, output_buffer_len, bUnicode );
+	}
+	void WaitForReply_Async( uint8_t nCmdType, uint8_t nCmd, uint8_t sn, uint32_t timeout, int8_t msgLen=0, uint8_t *output_buffer = NULL, uint8_t output_buffer_len = 0, bool bUnicode = false )
 	{
 		if ( this->state != DABState::Idle )
 		{
@@ -804,7 +878,7 @@ private:
 		this->wait_header[0] = START_BYTE;
 		if ( msgLen == 0 )
 		{
-			this->wait_header[1] = (uint8_t)DABReponseType::Ack;
+			this->wait_header[1] = (uint8_t)DABResponseType::Ack;
 			this->wait_header[2] = (uint8_t)DABResponse::Ack;
 		}
 		else
@@ -818,6 +892,7 @@ private:
 		this->timer = timeout;
 		this->wait_output_buffer = output_buffer;
 		this->wait_output_buffer_len = output_buffer_len;
+		this->isUnicode = bUnicode;
 	}
 
 	AsyncReturnCode WaitForIdle(uint32_t clock)
@@ -828,19 +903,24 @@ private:
 	}
 
 	const uint8_t WAIT_FOR_IDLE_TIME = 20;
+	DABNotificationType lastNotificationType;
 
 public:
 	uint8_t *MsgBuffer() { return wait_header; }
-	uint16_t MsgLen() { return wait_body_count < wait_body_length ? wait_byte_count : wait_body_length; }
+	uint16_t MsgLen() { return wait_body_count < wait_body_length ? wait_body_count : wait_body_length; }
+	DABNotificationType LastNotification() { return lastNotificationType; }
 
-	bool isIdle() { return state == DABState::Idle; }
+	bool isIdle() { return state == DABState::Idle || state == DABState::WaitForIdle; }
 
 	void PowerOff()
 	{
 		DABOff();
 		state = DABState::Off;
 	}	
-
+	void Mute(bool bMute)
+	{
+		DABMute( bMute );
+	}
 	void AsyncStart()
 	{
 		state = DABState::Initialise;
@@ -887,7 +967,7 @@ public:
 				break;
 
 			case DABState::WaitForReply:
-				if ( (int32_t)(timer - clock) <= 0 )
+				if ( (int32_t)timer - (int32_t)clock <= 0 )
 				{
 					state = DABState::Idle;
 					ret = AsyncReturnCode::ReplyTimedOut;
@@ -897,41 +977,72 @@ public:
 				while ( TSerialImpl::IsDataAvailable() )
 				{
 					uint8_t b = TSerialImpl::ReadByte();
-					if ( wait_byte_count < 4 )
+					if ( wait_byte_count < 5 )
 					{
-						// Read and validate header.
-						if ( wait_header[wait_byte_count++] != b )
-						{
-							ret = WaitForIdle(clock);
-							break;
-						}
+						header[wait_byte_count++] = b;
 					}
-					else if ( wait_byte_count < 6 )
+					else if ( wait_byte_count == 5 )
 					{
 						// Read the length
-						wait_header[wait_byte_count++] = b;
-						if ( wait_byte_count == 6 )
+						header[wait_byte_count++] = b;
+
+						if ( header[0] == START_BYTE &&
+							 header[1] == (uint8_t)DABResponseType::Ack &&
+							 header[2] == (uint8_t)DABResponse::Nak &&
+							 header[3] == wait_header[3] )	// SN
+						{	
+							// NACK is OK
+							wait_body_length = (header[4] << 8) | header[5];
+						}
+						else if ( !(header[0] == wait_header[0] &&
+								    header[1] == wait_header[1] &&
+								    header[2] == wait_header[2] &&
+								    header[3] == wait_header[3] ) )
 						{
-							wait_body_length = (wait_header[4] << 8) | wait_header[5];
+							ret  = WaitForIdle(clock);
+							break;
+						}
+						else
+						{
+							wait_body_length = (header[4] << 8) | header[5];
 							if ( wait_for_msgLen > 0 &&  (uint8_t)wait_for_msgLen != wait_body_length )
 							{
 								ret = WaitForIdle(clock);
 								break;
 							}
-							wait_body_count = 0;
 						}
+						wait_body_count = 0;
 					}
 					else
 					{
-						if ( wait_output_buffer )
+						if ( isUnicode )
 						{
-							if ( wait_body_count < wait_body_length )
-								wait_output_buffer[wait_body_count] = b;
+							if (wait_body_count & 1)
+							{
+								if ( wait_output_buffer )
+								{
+									if ( wait_body_count/2 < wait_body_length )
+										wait_output_buffer[wait_body_count/2] = b;
+								}
+								else
+								{
+									if ( wait_body_count/2 < sizeof(wait_header) )
+										wait_header[wait_body_count/2] = b;
+								}
+							}
 						}
 						else
 						{
-							if ( wait_body_count < sizeof(wait_header) )
-								wait_header[wait_body_count] = b;
+							if ( wait_output_buffer )
+							{
+								if ( wait_body_count < wait_body_length )
+									wait_output_buffer[wait_body_count] = b;
+							}
+							else
+							{
+								if ( wait_body_count < sizeof(wait_header) )
+									wait_header[wait_body_count] = b;
+							}
 						}
 						wait_body_count++;
 						if ( wait_body_count == wait_body_length + 1)
@@ -943,7 +1054,14 @@ public:
 							}
 							else
 							{
-								ret = AsyncReturnCode::ReplAck;
+								if ( header[1] == (uint8_t)DABResponseType::Ack &&
+									 header[2] == (uint8_t)DABResponse::Nak )
+									ret = AsyncReturnCode::ReplyNack;
+								else
+								{
+									if ( isUnicode ) wait_body_count /= 2;
+									ret = AsyncReturnCode::ReplAck;
+								}
 								state = DABState::Idle;
 							}
 						}
@@ -971,15 +1089,79 @@ public:
 				break;
 
 			case DABState::Idle:
+				if ( TSerialImpl::IsDataAvailable() )
+				{
+					state = DABState::WaitForNotification;
+					timer = clock + 500;
+					wait_byte_count = 0;
+					// fall through
+				}
+				else
+					break;
+
+			case DABState::WaitForNotification:
+				if ( (int32_t)timer - (int32_t)clock <= 0 )
+				{
+					state = DABState::Idle;
+					break;
+				}
+
 				while ( TSerialImpl::IsDataAvailable() )
 				{
 					uint8_t b = TSerialImpl::ReadByte();
-					b=b;
+					if ( wait_byte_count < 5 )
+					{
+						wait_header[wait_byte_count++] = b;
+					}
+					else if ( wait_byte_count == 5 )
+					{
+						wait_header[wait_byte_count++] = b;
+						// We should have everything now.  Verify
+						if ( wait_header[0] != START_BYTE ||
+						     wait_header[1] != (uint8_t)DABCmdType::Notification ||
+							 wait_header[2] > (uint8_t)DABNotificationType::Max ||
+							 wait_header[3] != 0 ) // serial no. always 0
+						{
+							state = DABState::Idle;
+							break;
+						}
+
+						wait_body_length = (wait_header[4] << 8) | wait_header[5];
+						wait_body_count = 0;
+						// wait_body_length - 0:0, 1:0, 2:0, 3:0, 4:0x10, 5:0x10, 6:1/4
+						lastNotificationType = (DABNotificationType)wait_header[2];
+						if ( !(((lastNotificationType == DABNotificationType::ScanTerminate || 
+							   lastNotificationType == DABNotificationType::NewProgrammeText || 
+							   lastNotificationType == DABNotificationType::DABReconfig ||
+							   lastNotificationType == DABNotificationType::DABSortingChange ) && wait_body_length == 0 ) ||
+							 ((lastNotificationType == DABNotificationType::RDSRawData ||
+							   lastNotificationType == DABNotificationType::NewDLSCmd) && wait_body_length == 0x10 ) ||
+							 ((lastNotificationType == DABNotificationType::ScanFrequency) &&  (wait_body_length == 1 || wait_body_length == 4) )
+							))
+						{
+							state = DABState::Idle;
+							break;
+						}
+					}
+					else
+					{
+						if ( wait_body_count < sizeof(wait_header) )
+							wait_header[wait_body_count] = b;
+						wait_body_count++;
+						if ( wait_body_count == wait_body_length + 1)
+						{
+							if ( b == END_BYTE )
+							{
+								ret = AsyncReturnCode::Notification;
+							}
+							state = DABState::Idle;
+						}
+					}
 				}
 				break;
 
-			case DABState::Off:
-				break;
+			//case DABState::Off:
+			//	break;
 		}
 		return ret;
 	}

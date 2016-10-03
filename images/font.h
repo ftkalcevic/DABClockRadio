@@ -18,7 +18,24 @@ struct FontStruct
 	const uint8_t * PROGMEM data;
 };
 
+struct PropCharStruct
+{
+	uint8_t width;
+	const uint8_t * data;
+};
+
+struct PropFontStruct
+{
+	uint8_t first_char;
+	uint8_t last_char;
+	uint8_t rows;
+	const struct PropCharStruct * chars;
+};
+
+
+
 extern const struct FontStruct font_6x13;
+extern const struct PropFontStruct font_MSShell;
 
 
 #endif /* FONT_H_ */
