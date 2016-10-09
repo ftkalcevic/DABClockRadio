@@ -729,75 +729,6 @@ void SetWaitForReply( RadioState success, RadioState failure)
 	failState = failure;
 }
 
-enum class StartUpTasks: uint8_t
-{
-	PlayProgramForTime = 0,
-	SetVolume0,
-	EnableSyncClock,
-	GetProgramCount,
-	GetPrograms,
-	GetSyncClockStatus,
-	GetClockStatus,
-	GetClock,
-	StopPlaying,
-	PowerOff,
-	TasksMax
-};
-
-enum class StartTasks: uint8_t
-{
-	PlayProgram=0,
-	EnableSyncClock,
-	SetVolume,
-	SetNotifications,
-	GetProgramText,
-	TasksMax
-};
-
-
-enum class GetProgramTextTasks: uint8_t
-{
-	GetProgramText=0,
-	TasksMax
-};
-
-enum class PollTasks: uint8_t
-{
-	GetPlayStatus=0,
-	GetPlayMode,
-	GetPlayIndex,
-	GetSignalStrength,
-	//GetStereoMode,
-	//GetStereo,
-	//GetVolume,
-	//GetProgrameType,
-	//GetProgrameName,
-	GetProgrameText,
-	//GetSamplingRate,
-	//GetDataRate,
-	//GetSignalQuality,
-	//GetFrequency,
-	//GetEnsembleName,
-	//GetTotalProgram,
-	//IsActive,
-	//GetServiceName,
-	//GetSearchProgram,
-	//GetPowerBar,
-	//GetServCompType,
-	//GetPreset,
-	//GetSorter,
-	//GetDrc,
-	//GetBBEEQ,
-	//GetHeadroom,
-	//GetDLSCmd,
-	//GetECC,
-	//GetRdsPIcode,
-	//GetServFollowingDABInfo,
-	//GetRDSRawData.
-
-
-	TasksMax
-};
 
 enum class TaskReturn: uint8_t
 {
@@ -805,32 +736,38 @@ enum class TaskReturn: uint8_t
 	Fail,
 	Continue
 };
+
+enum class TaskInit: uint8_t
+{
+	OK,
+	Fail,
+	Skip
+};
+
+#define MAX_TASKS	15
 static struct StartupTaskFuncs
 {
-	bool (*init)();
+	TaskInit (*init)();
 	TaskReturn (*check)(AsyncReturnCode ret);
 
-}	StartUpTaskList[(int)StartUpTasks::TasksMax], 
-	StartTaskList[(int)StartTasks::TasksMax], 
-	PollTaskList[(int)PollTasks::TasksMax], 
-	GetProgramTextTaskList[(int)GetProgramTextTasks::TasksMax],  *pTasks;
+} TaskList[MAX_TASKS];
 uint8_t nTaskCount;
 
 
-bool funcSetVolume0_init() 
+static TaskInit funcSetVolume0_init() 
 {
 	dab.STREAM_SetVolume_Async(0, ms );
-	return true;
+	return TaskInit::OK;
 } 
 
-bool funcSetVolume_init()
+static TaskInit funcSetVolume_init()
 {
 	dab.STREAM_SetVolume_Async(nLastVolume, ms );
-	return true;
+	return TaskInit::OK;
 }
 
 
-bool funcSetNotifications_init()
+static TaskInit funcSetNotifications_init()
 {
 	dab.NOTIFY_SetNotification_Async(   (DABNotification)((uint16_t)DABNotification::ScanFinished |
 										(uint16_t)DABNotification::NewFMText |
@@ -839,7 +776,7 @@ bool funcSetNotifications_init()
 										(uint16_t)DABNotification::FMRDSGrpNotify |
 										(uint16_t)DABNotification::NewDABText |
 										(uint16_t)DABNotification::ScanFrequency), ms );
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn ack_check(AsyncReturnCode ret) 
@@ -850,10 +787,10 @@ static TaskReturn ack_check(AsyncReturnCode ret)
 		return TaskReturn::Fail;
 } 
 
-bool funcEnableSyncClock_init() 
+static TaskInit funcEnableSyncClock_init() 
 {
 	dab.RTC_EnableSyncClock_Async(1, ms );
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn funcGetSyncClockStatus_check(AsyncReturnCode ret)
@@ -866,10 +803,10 @@ static TaskReturn funcGetSyncClockStatus_check(AsyncReturnCode ret)
 	return bSet ? TaskReturn::Done : TaskReturn::Fail;
 }
 
-bool funcGetSyncClockStatus_init()
+static TaskInit funcGetSyncClockStatus_init()
 {
 	dab.RTC_GetSyncClockStatus_Async( ms );
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn funcGetClockStatus_check(AsyncReturnCode ret)
@@ -886,17 +823,17 @@ static TaskReturn funcGetClockStatus_check(AsyncReturnCode ret)
 #endif
 }
 
-bool funcGetClockStatus_init()
+static TaskInit funcGetClockStatus_init()
 {
 	dab.RTC_GetClockStatus_Async( ms );
-	return true;
+	return TaskInit::OK;
 }
 
 // TODO - call this every 5 minutes or so to verify the time.
-bool funcGetClock_init()
+static TaskInit funcGetClock_init()
 {
 	dab.RTC_GetClock_Async(ms);
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn funcGetClock_check(AsyncReturnCode ret)
@@ -921,10 +858,16 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 		return TaskReturn::Fail;	
 }
 
-bool funcGetProgramCount_init()
+static TaskReturn funcGetClock_Optional_check(AsyncReturnCode ret)
+{
+	funcGetClock_check(ret);
+	return TaskReturn::Done;
+}
+
+static TaskInit funcGetProgramCount_init()
 {
 	dab.STREAM_GetTotalProgram_Async(ms);
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn funcGetProgramCount_check(AsyncReturnCode ret)
@@ -942,11 +885,11 @@ static TaskReturn funcGetProgramCount_check(AsyncReturnCode ret)
 		return TaskReturn::Fail;
 }
 
-bool funcGetPrograms_init()
+static TaskInit funcGetPrograms_init()
 {
 	bool bFullName = programs[nProgramIdx].sLongName == NULL ? true: false;
 	dab.STREAM_GetProgrammeName_Async(nProgramIdx, bFullName, sProgramNames, 256, ms);
-	return true;
+	return TaskInit::OK;
 }
 
 static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
@@ -980,13 +923,13 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 		return TaskReturn::Fail;
 }
 
-bool funcPlayProgramForTime_init()
+static TaskInit funcPlayProgramForTime_init()
 {
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
-	return true;
+	return TaskInit::OK;
 }
 
-bool funcPlayProgram_init()
+static TaskInit funcPlayProgram_init()
 {
 	const char *sProgram = programs[nLastPlayedProgram].sLongName;
 
@@ -996,53 +939,48 @@ bool funcPlayProgram_init()
 	//display.WriteText( &font_MSShell, 0, 0, sProgram );
 	display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
 	
-
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
-	return true;
+	return TaskInit::OK;
 }
 
-
-bool funcStopPlaying_init()
+static TaskInit funcStopPlaying_init()
 {
 	dab.STREAM_Stop_Async(ms);
-	return true;
+	return TaskInit::OK;
 }
 
-
-bool funcPowerOff_init()
+static TaskInit funcPowerOff_init()
 {
 	dab.PowerOff();
 	display.displayPowerOff();
-	return true;
+	return TaskInit::OK;
 }
 
 void InitStartUpTasks()
 {
-	memset( StartUpTaskList, 0, sizeof(StartUpTaskList) );
-	nTaskCount = (uint8_t)StartUpTasks::TasksMax;
-	pTasks = StartUpTaskList;
 	task = 0;
+	nTaskCount = 0;
 
-	StartUpTaskList[(int)StartUpTasks::SetVolume0].init = funcSetVolume0_init; StartUpTaskList[(int)StartUpTasks::SetVolume0].check = ack_check;
-	StartUpTaskList[(int)StartUpTasks::EnableSyncClock].init = funcEnableSyncClock_init; StartUpTaskList[(int)StartUpTasks::EnableSyncClock].check = ack_check;
-	StartUpTaskList[(int)StartUpTasks::GetSyncClockStatus].init = funcGetSyncClockStatus_init; StartUpTaskList[(int)StartUpTasks::GetSyncClockStatus].check = funcGetSyncClockStatus_check;
-	StartUpTaskList[(int)StartUpTasks::GetClockStatus].init = funcGetClockStatus_init; StartUpTaskList[(int)StartUpTasks::GetClockStatus].check = funcGetClockStatus_check;
+	TaskList[nTaskCount++] = { funcPlayProgramForTime_init, ack_check };
+	TaskList[nTaskCount++] = { funcSetVolume0_init, ack_check };
+	TaskList[nTaskCount++] = { funcEnableSyncClock_init, ack_check };
+	TaskList[nTaskCount++] = { funcGetProgramCount_init, funcGetProgramCount_check };
+	TaskList[nTaskCount++] = { funcGetPrograms_init, funcGetPrograms_check };
+	TaskList[nTaskCount++] = { funcGetSyncClockStatus_init, funcGetSyncClockStatus_check };
+	TaskList[nTaskCount++] = { funcGetClockStatus_init, funcGetClockStatus_check };
 #ifdef SET_CLOCK_AT_POWERUP
-	StartUpTaskList[(int)StartUpTasks::GetClock].init = funcGetClock_init; StartUpTaskList[(int)StartUpTasks::GetClock].check = funcGetClock_check;
+	TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_check };
 #else
 	bClockInitialised = true;
 #endif
-	StartUpTaskList[(int)StartUpTasks::GetProgramCount].init = funcGetProgramCount_init; StartUpTaskList[(int)StartUpTasks::GetProgramCount].check = funcGetProgramCount_check;
-	StartUpTaskList[(int)StartUpTasks::GetPrograms].init = funcGetPrograms_init; StartUpTaskList[(int)StartUpTasks::GetPrograms].check = funcGetPrograms_check;
-	StartUpTaskList[(int)StartUpTasks::PlayProgramForTime].init = funcPlayProgramForTime_init; StartUpTaskList[(int)StartUpTasks::PlayProgramForTime].check = ack_check;
-	StartUpTaskList[(int)StartUpTasks::StopPlaying].init = funcStopPlaying_init; StartUpTaskList[(int)StartUpTasks::StopPlaying].check = ack_check;
-	StartUpTaskList[(int)StartUpTasks::PowerOff].init = funcPowerOff_init; //StartUpTaskList[PowerOff].check = NULL;
+	TaskList[nTaskCount++] = { funcStopPlaying_init, ack_check };
+	TaskList[nTaskCount++] = { funcPowerOff_init, NULL };
 }
 
-bool funcGetProgramText_init()
+static TaskInit funcGetProgramText_init()
 {
 	dab.STREAM_GetProgrammeText_Async( sProgramNames, 256, ms);
-	return true;
+	return TaskInit::OK;
 }
 
 
@@ -1075,15 +1013,14 @@ static TaskReturn funcGetProgramText_check(AsyncReturnCode ret)
 
 static void InitStartTasks()
 {
-	memset( StartTaskList, 0, sizeof(StartTaskList) );
-	nTaskCount = (uint8_t)StartTasks::TasksMax;
-	pTasks = StartTaskList;
 	task = 0;
-	StartTaskList[(int)StartTasks::EnableSyncClock].init = funcEnableSyncClock_init; StartTaskList[(int)StartTasks::EnableSyncClock].check = ack_check;
-	StartTaskList[(int)StartTasks::PlayProgram].init = funcPlayProgram_init; StartTaskList[(int)StartTasks::PlayProgram].check = ack_check;
-	StartTaskList[(int)StartTasks::GetProgramText].init = funcGetProgramText_init; StartTaskList[(int)StartTasks::GetProgramText].check = funcGetProgramText_check;
-	StartTaskList[(int)StartTasks::SetVolume].init = funcSetVolume_init; StartTaskList[(int)StartTasks::SetVolume].check = ack_check;
-	StartTaskList[(int)StartTasks::SetNotifications].init = funcSetNotifications_init; StartTaskList[(int)StartTasks::SetNotifications].check = ack_check;
+	nTaskCount = 0;
+
+	TaskList[nTaskCount++] = { funcPlayProgram_init, ack_check };
+	TaskList[nTaskCount++] = { funcEnableSyncClock_init, ack_check };
+	TaskList[nTaskCount++] = { funcSetVolume_init, ack_check };
+	TaskList[nTaskCount++] = { funcSetNotifications_init, ack_check };
+	TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
 }
 
 static TaskReturn funcGetProgramTextNotify_check(AsyncReturnCode ret)
@@ -1106,18 +1043,17 @@ static TaskReturn funcGetProgramTextNotify_check(AsyncReturnCode ret)
 
 static void InitGetProgramTextTasks()
 {
-	memset( GetProgramTextTaskList, 0, sizeof(GetProgramTextTaskList) );
-	nTaskCount = (uint8_t)GetProgramTextTasks::TasksMax;
-	pTasks = GetProgramTextTaskList;
 	task = 0;
+	nTaskCount = 0;
 
-	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramText_check;
-//	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramTextNotify_check;
+	TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
+	//PollTaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramTextNotify_check };
 }
 
-static bool funcGetPlayStatus_init() 
+static TaskInit funcGetPlayStatus_init() 
 { 
-	dab.STREAM_GetPlayStatus_Async(ms); return true; 
+	dab.STREAM_GetPlayStatus_Async(ms); 
+	return TaskInit::OK; 
 }
 static TaskReturn funcGetPlayStatus_check(AsyncReturnCode ret) 
 { 
@@ -1130,9 +1066,10 @@ static TaskReturn funcGetPlayStatus_check(AsyncReturnCode ret)
 	}
 	return TaskReturn::Fail;
 }
-static bool funcGetPlayMode_init() 
+static TaskInit funcGetPlayMode_init() 
 {	
-	dab.STREAM_GetPlayMode_Async(ms); return true; 
+	dab.STREAM_GetPlayMode_Async(ms); 
+	return TaskInit::OK; 
 }
 static TaskReturn funcGetPlayMode_check(AsyncReturnCode ret) 
 { 
@@ -1145,9 +1082,10 @@ static TaskReturn funcGetPlayMode_check(AsyncReturnCode ret)
 	}
 	return TaskReturn::Fail;
 }
-static bool funcGetPlayIndex_init() 
+static TaskInit funcGetPlayIndex_init() 
 { 
-	dab.STREAM_GetPlayIndex_Async(ms); return true; 
+	dab.STREAM_GetPlayIndex_Async(ms); 
+	return TaskInit::OK; 
 }
 static TaskReturn funcGetPlayIndex_check(AsyncReturnCode ret) 
 { 
@@ -1160,9 +1098,10 @@ static TaskReturn funcGetPlayIndex_check(AsyncReturnCode ret)
 	}
 	return TaskReturn::Fail;
 }
-static bool funcGetSignalStrength_init() 
+static TaskInit funcGetSignalStrength_init() 
 { 
-	dab.STREAM_GetSignalStrength_Async(ms); return true; 
+	dab.STREAM_GetSignalStrength_Async(ms); 
+	return TaskInit::OK; 
 }
 static TaskReturn funcGetSignalStrength_check(AsyncReturnCode ret) 
 { 
@@ -1184,35 +1123,50 @@ static TaskReturn funcGetSignalStrength_check(AsyncReturnCode ret)
 	return TaskReturn::Fail;
 }
 
-
-void InitPollTasks()
+static TaskInit funcUpdateVolume_init()
 {
-	memset( PollTaskList, 0, sizeof(PollTaskList) );
-	nTaskCount = (uint8_t)PollTasks::TasksMax;
-	pTasks = PollTaskList;
-	task = 0;
-
-	PollTaskList[(int)PollTasks::GetPlayStatus].init = funcGetPlayStatus_init; PollTaskList[(int)PollTasks::GetPlayStatus].check = funcGetPlayStatus_check;
-	PollTaskList[(int)PollTasks::GetPlayMode].init = funcGetPlayMode_init; PollTaskList[(int)PollTasks::GetPlayMode].check = funcGetPlayMode_check;
-	PollTaskList[(int)PollTasks::GetPlayIndex].init = funcGetPlayIndex_init; PollTaskList[(int)PollTasks::GetPlayIndex].check = funcGetPlayIndex_check;
-	PollTaskList[(int)PollTasks::GetSignalStrength].init = funcGetSignalStrength_init; PollTaskList[(int)PollTasks::GetSignalStrength].check = funcGetSignalStrength_check;
-	PollTaskList[(int)PollTasks::GetProgrameText].init = funcGetProgramText_init; PollTaskList[(int)PollTasks::GetProgrameText].check = funcGetProgramText_check;
+	return TaskInit::Skip;
 }
 
-int8_t NextTask(bool bPassed)
+TaskReturn funcUpdateVolume_check(AsyncReturnCode ret )
 {
-	if ( bPassed )
-		pTasks[task].init = NULL;
-		
-	for ( uint8_t i = 0; i < nTaskCount; i++ )
+	return TaskReturn::Done;
+}
+
+void InitPollTasks(uint8_t nLevel)
+{
+	task = 0;
+	nTaskCount = 0;
+
+	// every second - radio play status, volume
+	// every 15 seconds - play mode, play index, signal strength, program text
+	// every 5 minutes - clock
+
+	if ( nLevel >= 1 )
 	{
-		task++;
-		if ( task >= nTaskCount )
-			task = 0;
-		if ( pTasks[task].init != NULL )
-			return task;
+		TaskList[nTaskCount++] = { funcGetPlayStatus_init, funcGetPlayStatus_check };
+		TaskList[nTaskCount++] = { funcUpdateVolume_init, funcUpdateVolume_check };
 	}
-	return -1;
+	if ( nLevel >= 2 )
+	{
+		TaskList[nTaskCount++] = { funcGetPlayMode_init, funcGetPlayMode_check };
+		TaskList[nTaskCount++] = { funcGetPlayIndex_init, funcGetPlayIndex_check };
+		TaskList[nTaskCount++] = { funcGetSignalStrength_init, funcGetSignalStrength_check };
+		TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
+	}
+	if ( nLevel >= 3 )
+	{
+		TaskList[nTaskCount++] = { funcEnableSyncClock_init, ack_check };
+		TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
+	}
+}
+
+int8_t NextTask()
+{
+	task++;
+	if ( task >= nTaskCount )
+		task = -1;
+	return task;
 }
 
 void DoDAB()
@@ -1257,44 +1211,49 @@ void DoDAB()
 				break;
 
 			case RadioState::StartUpTasks:
+			{
 				// Next task
-				if ( pTasks[task].init() )
+				TaskInit t = TaskList[task].init();
+				if ( t == TaskInit::OK || t == TaskInit::Skip )
 				{
-					if ( pTasks[task].check != NULL )
-						radioState = RadioState::WaitForTaskReply;
-					else
+					if ( t == TaskInit::Skip || TaskList[task].check == NULL )
 					{
-						task = NextTask(true);
+						task = NextTask();
 						if ( task < 0 )
 							radioState = taskDoneState;	// Done.
 					}
+					else
+					{
+						radioState = RadioState::WaitForTaskReply;
+					}
 				}
+			}
 				break;
 				
 			case RadioState::WaitForTaskReply:
-			if ( ret != AsyncReturnCode::OK )
-			{
-				TaskReturn tret = TaskReturn::Done;
-				if ( pTasks[task].check != NULL )
-					tret = pTasks[task].check(ret);
-				if ( tret == TaskReturn::Done )
+				if ( ret != AsyncReturnCode::OK )
 				{
-					task = NextTask(true);
-					if ( task < 0 )
-						radioState = taskDoneState;	// Done.
-					else
+					TaskReturn tret = TaskReturn::Done;
+					if ( TaskList[task].check != NULL )
+						tret = TaskList[task].check(ret);
+					if ( tret == TaskReturn::Done )
+					{
+						task = NextTask();
+						if ( task < 0 )
+							radioState = taskDoneState;	// Done.
+						else
+							radioState = RadioState::StartUpTasks;
+					}
+					else if ( tret == TaskReturn::Continue )
+					{
 						radioState = RadioState::StartUpTasks;
+					}
+					else 
+					{
+						radioState = RadioState::StartUpTasksPause;
+						radioTimer = ms + 250;
+					}
 				}
-				else if ( tret == TaskReturn::Continue )
-				{
-					radioState = RadioState::StartUpTasks;
-				}
-				else 
-				{
-					radioState = RadioState::StartUpTasksPause;
-					radioTimer = ms + 250;
-				}
-			}
 			break;
 
 			case RadioState::StartUpTasksPause:
@@ -1317,6 +1276,7 @@ void DoDAB()
 			case RadioState::Playing:
 				if ( ret == AsyncReturnCode::Notification )
 				{
+					// TODO - decide - do we continue with this?  Even after receiving the notification, programme text is not there.
 					if ( dab.LastNotification() == DABNotificationType::NewProgrammeText )
 					{
 						InitGetProgramTextTasks();
@@ -1332,10 +1292,14 @@ void DoDAB()
 				}
 				else
 				{
+					// Execute Scheduled task lists
+					// every second - radio play status, volume
+					// every 15 seconds - play mode, play index, signal strength, program text
+					// every 5 minutes - clock
 					static uint32_t pollTimer = 0;
 					if ( (int32_t)pollTimer - (int32_t)ms <= 0 )
 					{
-						InitPollTasks();
+						InitPollTasks(1);
 						radioState = RadioState::StartUpTasks;
 						taskDoneState = RadioState::Playing;
 						pollTimer = ms + 15000;
