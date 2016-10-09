@@ -70,7 +70,7 @@ static Programs *programs;
 static uint16_t nPrograms;
 static uint16_t nProgramIdx;
 static char *sProgramNames;
-static uint16_t nLastPlayedProgram = 30;
+static uint16_t nLastPlayedProgram = 30; //4; //30;
 static uint16_t nLastVolume = 8;
 
 
@@ -387,6 +387,17 @@ static void ioinit()
 
 	display.Init();
 	display.InitDisplay();
+
+	// ADC (volume)
+	PR.PRPA &= ~PR_ADC_bm;
+	ADCA.CTRLA =  ADC_ENABLE_bm;
+	ADCA.CTRLB = ADC_FREERUN_bm;
+	ADCA.REFCTRL = ADC_REFSEL_INTVCC_gc;
+	ADCA.PRESCALER = ADC_PRESCALER_DIV512_gc;
+
+	ADCA.CH0.CTRL = ADC_CH_INPUTMODE_SINGLEENDED_gc;
+	ADCA.CH0.MUXCTRL = ADC_CH_MUXPOS_PIN10_gc;
+	ADCA.CH0.CTRL |= ADC_CH_START_bm;
 
 	// Enable interrupt controller
 	PMIC.CTRL = PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm | PMIC_HILVLEN_bm;
@@ -863,12 +874,16 @@ bool funcGetSyncClockStatus_init()
 
 static TaskReturn funcGetClockStatus_check(AsyncReturnCode ret)
 {
+#ifdef SET_CLOCK_AT_POWERUP
 	bool bEnabled = false;
 	if ( ret == AsyncReturnCode::ReplAck )
 	{
 		bEnabled = dab.MsgBuffer()[0] != 0;
 	}
 	return bEnabled ? TaskReturn::Done : TaskReturn::Fail;
+#else
+	return TaskReturn::Done;
+#endif
 }
 
 bool funcGetClockStatus_init()
@@ -1012,7 +1027,11 @@ void InitStartUpTasks()
 	StartUpTaskList[(int)StartUpTasks::EnableSyncClock].init = funcEnableSyncClock_init; StartUpTaskList[(int)StartUpTasks::EnableSyncClock].check = ack_check;
 	StartUpTaskList[(int)StartUpTasks::GetSyncClockStatus].init = funcGetSyncClockStatus_init; StartUpTaskList[(int)StartUpTasks::GetSyncClockStatus].check = funcGetSyncClockStatus_check;
 	StartUpTaskList[(int)StartUpTasks::GetClockStatus].init = funcGetClockStatus_init; StartUpTaskList[(int)StartUpTasks::GetClockStatus].check = funcGetClockStatus_check;
+#ifdef SET_CLOCK_AT_POWERUP
 	StartUpTaskList[(int)StartUpTasks::GetClock].init = funcGetClock_init; StartUpTaskList[(int)StartUpTasks::GetClock].check = funcGetClock_check;
+#else
+	bClockInitialised = true;
+#endif
 	StartUpTaskList[(int)StartUpTasks::GetProgramCount].init = funcGetProgramCount_init; StartUpTaskList[(int)StartUpTasks::GetProgramCount].check = funcGetProgramCount_check;
 	StartUpTaskList[(int)StartUpTasks::GetPrograms].init = funcGetPrograms_init; StartUpTaskList[(int)StartUpTasks::GetPrograms].check = funcGetPrograms_check;
 	StartUpTaskList[(int)StartUpTasks::PlayProgramForTime].init = funcPlayProgramForTime_init; StartUpTaskList[(int)StartUpTasks::PlayProgramForTime].check = ack_check;
@@ -1092,8 +1111,8 @@ static void InitGetProgramTextTasks()
 	pTasks = GetProgramTextTaskList;
 	task = 0;
 
-//	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramText_check;
-	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramTextNotify_check;
+	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramText_check;
+//	GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].init = funcGetProgramText_init; GetProgramTextTaskList[(int)GetProgramTextTasks::GetProgramText].check = funcGetProgramTextNotify_check;
 }
 
 static bool funcGetPlayStatus_init() 
@@ -1363,24 +1382,58 @@ static void RadioOff()
 
 #define PROGRAM_TEXT_POS	36
 
-static void DrawProgramText(bool bRedraw)
+static uint16_t textXShift = 0, textXShiftMax;
+static int16_t xoffs;
+static char sText[256];
+
+static bool DrawProgramText(bool bNewText)
 {
-	uint8_t len = strlen(sProgramNames);
-	if ( len > OP_SCREENW / (1+font_6x13.cols) )
+	bool bShifting = false;
+	uint8_t len = strlen(sText);
+
+	if ( bNewText )
 	{
-		len = OP_SCREENW / (1+font_6x13.cols);
-		sProgramNames[len] = 0;
+		textXShift = 0;
+		uint16_t plen = len * (font_6x13.cols+1);
+		if ( plen <= OP_SCREENW )
+		{
+			// Small enough to fit on the screen.
+			xoffs = (OP_SCREENW - plen) / 2;
+		}
+		else 
+		{
+			xoffs = -1;
+			textXShiftMax = plen - OP_SCREENW;
+		}
 	}
-	uint16_t plen = len * (1+font_6x13.cols);
-	if ( plen <= OP_SCREENW && bRedraw )
+	if ( xoffs >= 0 )
 	{
-		display.WriteText( &font_6x13, (OP_SCREENW - plen)/2, PROGRAM_TEXT_POS, sProgramNames);
+		if ( bNewText )
+			display.WriteText( &font_6x13, xoffs, PROGRAM_TEXT_POS, sText);
 	}
-	else
+	else 
 	{
-		
+		if ( textXShift < textXShiftMax )
+		{
+			div_t offs = div( textXShift, font_6x13.cols+1 );
+
+			display.WriteText( &font_6x13, -offs.rem, PROGRAM_TEXT_POS, sText+offs.quot);
+			textXShift++;
+			bShifting = true;
+		}
 	}
+	return bShifting;
 }
+
+static enum class ScrollState: uint8_t
+{
+	idle,
+	shiftingOut,
+	startNew,
+	pause,
+	scroll
+} scrollState = ScrollState::idle, scrollNextState;
+uint32_t scrollDelay;
 
 static void ScrollText(bool bRedraw)
 {
@@ -1390,39 +1443,71 @@ static void ScrollText(bool bRedraw)
 
 	if ( bRedraw )
 	{
+		strncpy( sText, sProgramNames, sizeof(sText) );
+		sText[sizeof(sText)-1] = '\0';
 		nShiftCount = font_6x13.rows+1;
+		scrollState = ScrollState::shiftingOut;
 	}
 	if ( ms8 != last_ms8 )
 	{
-		if ( nShiftCount && (ms8 & 0x3f) == 0 )
+		switch ( scrollState )
 		{
-			uint16_t xs =0;
-			uint8_t ys = PROGRAM_TEXT_POS-1+font_6x13.rows-(nShiftCount-1);
-			uint16_t xe = OP_SCREENW-1;
-			uint8_t ye = PROGRAM_TEXT_POS+font_6x13.rows;
-			uint16_t xd=0;
-			uint8_t yd = ys+1;
-			//terminal.Send("Copy ");
-			//terminal.Send(xs); terminal.Send(",");
-			//terminal.Send(ys); terminal.Send(" ");
-			//terminal.Send(xe); terminal.Send(",");
-			//terminal.Send(ye); terminal.Send(" ");
-			//terminal.Send(xd); terminal.Send(",");
-			//terminal.Send(yd); terminal.SendCRLF();
+			case ScrollState::idle:
+				break;
 
-			display.Copy( xs,ys, xe,ye, xd,yd );
-			nShiftCount--;
-			if ( nShiftCount == 0 )
-			{
-				// todo don't do thsi as an array.
-				_delay_ms(1);
-				display.ClearWindow( xd,yd, xe,yd+1 );
-				DrawProgramText(true);
-			}
-		}
-		else if ( ms8 == 0 )
-		{
-			DrawProgramText(bRedraw);
+			case ScrollState::shiftingOut:
+				// Are we shifting the text away.
+				if ( nShiftCount && (ms8 & 0x3f) == 0 )
+				{
+					uint16_t xs =0;
+					uint8_t ys = PROGRAM_TEXT_POS-1+font_6x13.rows-(nShiftCount-1);
+					uint16_t xe = OP_SCREENW-1;
+					uint8_t ye = PROGRAM_TEXT_POS+font_6x13.rows;
+					uint16_t xd=0;
+					uint8_t yd = ys+1;
+
+					display.Copy( xs,ys, xe,ye, xd,yd );
+					nShiftCount--;
+					if ( nShiftCount == 0 )
+						scrollState = ScrollState::startNew;
+				}
+				break;
+
+			case ScrollState::startNew:
+				{
+					uint16_t xe = OP_SCREENW-1;
+					uint16_t xd=0;
+					uint8_t yd = PROGRAM_TEXT_POS-1+font_6x13.rows;
+
+					display.ClearWindow( xd,yd, xe,yd+1 );
+
+					if ( DrawProgramText(true) )
+					{
+						scrollDelay = ms + 3000;
+						scrollState = ScrollState::pause;
+						scrollNextState = ScrollState::scroll;
+					}
+					else
+						scrollState = ScrollState::idle;
+				}
+				break;
+
+			case ScrollState::pause:
+				if ( (int32_t)scrollDelay - (int32_t)ms < 0 )
+				{
+					scrollState = scrollNextState;
+				}
+				break;
+
+			case ScrollState::scroll:
+				if ( !DrawProgramText(false) )
+				{
+					nShiftCount = font_6x13.rows+1;
+					scrollDelay = ms + 3000;
+					scrollState = ScrollState::pause;
+					scrollNextState = ScrollState::shiftingOut;
+				}
+				break;
 		}
 		last_ms8 = ms8;
 	}
@@ -1491,7 +1576,7 @@ void Spinner()
 	static uint8_t lc = 0;
 	lc = (lc-1) & 0x3F;
 	uint8_t c = lc;
-	for ( int8_t i = 0; i < countof(pos); i++ )
+	for ( uint8_t i = 0; i < countof(pos); i++ )
 	{
 		display.WriteText( &font_6x13, pos[i].x, pos[i].y, "\x7f", c );
 		c += 0x3F/12;
@@ -1628,19 +1713,48 @@ int main(void)
 			//display.WriteText( &font_6x13, 287-30, 36, "Line4" );
 			//for (;;);
 		}
-		//if ( !dab.isIdle() )
-		//{
-			//static uint8_t i = 189;
-			//if ( i != 0 )
-			//{
-				//display.WriteText( &font_6x13, i-1, 0, "Initialising..." );
-				//i--;
-			//}
-		//}
 
+
+
+		static uint8_t last_adc = 0;
+		if ( last_adc != ms8 )
+		{
+			last_adc = ms8;
+			static uint8_t n = 0;
+			static uint16_t sum = 0;
+
+			if ( ADCA.CH0.INTFLAGS & ADC_CH_CHIF_bm )
+			{
+				ADCA.CH0.INTFLAGS |= ADC_CH_CHIF_bm;
+				sum += ADCA.CH0.RES;
+				n++;
+				if ( n == 16 )
+				{
+					sum >>= 4;
+					//terminal.Send("ADC: ");
+					//terminal.Send(sum);
+					//terminal.SendCRLF();
+					n = 0;
+					sum = 0;
+				}
+				ADCA.CH0.CTRL |= ADC_CH_START_bm;
+			}
+		}
 
 		DoClockRadio(key_changes);
 		DoDAB();
+
+		//static int16_t t=0;
+		//display.WriteText(&font_6x13, 258+t,0,"test1");
+		//display.WriteText(&font_6x13, 259+t,11,"test2");
+		//display.WriteText(&font_6x13, 260+t,23,"test3");
+		//display.WriteText(&font_6x13, 261+t,35,"test4");
+//
+		//display.WriteText(&font_6x13,  0-t,0,"test1");
+		//display.WriteText(&font_6x13, -1-t,11,"test2");
+		//display.WriteText(&font_6x13, -2-t,23,"test3");
+		//display.WriteText(&font_6x13, -3-t,35,"test4");
+		//t++;
     }
 }
 
@@ -1698,6 +1812,7 @@ DAB
 			-- factory reset?
 		-- different display layouts
 		-- other?
+		-- sleep time, snooze time.
 
 	-- if program count = 0 dab scan (or just menu?)
 */

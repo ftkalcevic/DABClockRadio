@@ -311,7 +311,7 @@ public:
 	}
 
 	// Write a line of text.  No clipping or boundary checking.  Monospace.
-	void WriteText( const FontStruct * font, uint16_t x, uint8_t y, const char *s, uint8_t colour = 0x3F )
+	void WriteText( const FontStruct * font, int16_t x, int8_t y, const char *s, uint8_t colour = 0x3F )
 	{
 		uint8_t slen = strlen(s);
 		uint16_t plen = slen * (font->cols + 1);
@@ -322,38 +322,59 @@ public:
 
 		// bounding rectangle
 		SetRow( y, y+font->rows-1 );
-		SetColumn( start.quot, end.quot + (end.rem ? 1 : 0) - 1 );
+
+		int16_t xe = end.quot + (end.rem ? 1 : 0) - 1;
+		if ( xe >= OP_SCREENW/3 )
+			xe = OP_SCREENW/3 - 1;
+		int16_t xs = start.quot;
+		if ( xs < 0 )
+			xs = 0;
+		SetColumn( xs, xe );
 
 		// output the data into the block, row by row, letting the graphics controller shift lines.
+		int16_t startx = (start.quot + (start.rem < 0 ? -1 : 0 ))*3;
+		if ( start.rem < 0 )
+			start.rem += 3;
 		for ( uint8_t row = 0; row < font->rows; row++ )
 		{
 			const char *ptr = s;
 			uint8_t p = 0;
+			int16_t px = startx;
 
 			// Leading pixels
-			for ( ; p < start.rem; p++ )
-				PutPixel( 0, p );
+			for ( ; p < start.rem; p++, px++ )
+				if ( px >= 0 )
+					PutPixel( 0, p );
 
 			// text
-			while ( *ptr )
+			while ( *ptr && px < OP_SCREENW )
 			{
 				uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
-				for ( uint8_t c = 0; c < font->cols; c++ )
+				for ( uint8_t c = 0; c < font->cols && px < OP_SCREENW; c++ )
 				{
-					PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
+					if ( px >= 0 )
+						PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
+					p++;
+					px++;
+					if (p==3) p = 0;
+				}
+				if ( px < OP_SCREENW )
+				{
+					if ( px >= 0 )
+						PutPixel( 0, p );
+					px++;
 					p++;
 					if (p==3) p = 0;
 				}
-				PutPixel( 0, p );
-				p++;
-				if (p==3) p = 0;
 				ptr++;
 			}
 
 			// trailing pixels
-			for ( int8_t i = end.rem; i >= 0 ; i-- )
+			for ( int8_t i = end.rem; i >= 0 && px < OP_SCREENW; i-- )
 			{
-				PutPixel( 0, p );
+				if ( px >= 0 )
+					PutPixel( 0, p );
+				px++;
 				p++;
 			}
 		}
