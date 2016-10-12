@@ -71,7 +71,8 @@ static uint16_t nPrograms;
 static uint16_t nProgramIdx;
 static char *sProgramNames;
 static uint16_t nLastPlayedProgram = 30; //4; //30;
-static uint16_t nLastVolume = 8;
+static uint16_t nLastVolume = 0;	// What the volume is.
+static uint8_t volumeSetting = 0;	// What to set it to.
 
 
 
@@ -719,6 +720,7 @@ static enum class RadioState: uint8_t
 	StartPlaying,
 	InitStartTasks,
 	Playing,
+	PlayingNext
 } radioState = RadioState::Init, successState, failState, taskDoneState;
 static int8_t task;
 
@@ -852,6 +854,9 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 
 		UpdateTime( t );
 
+		if ( radioState != RadioState::Off )
+			ShowDate();
+
 		return TaskReturn::Done;
 	}
 	else
@@ -936,8 +941,8 @@ static TaskInit funcPlayProgram_init()
 	terminal.Send("ProgramName: ");
 	terminal.Send(sProgram);
 	terminal.SendCRLF();
-	//display.WriteText( &font_MSShell, 0, 0, sProgram );
-	display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
+	display.WriteText( &font_MSShell, 0, 0, sProgram );
+	//display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
 	
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
 	return TaskInit::OK;
@@ -1125,6 +1130,20 @@ static TaskReturn funcGetSignalStrength_check(AsyncReturnCode ret)
 
 static TaskInit funcUpdateVolume_init()
 {
+	if ( volumeSetting != nLastVolume )
+	{
+		if ( nLastVolume < volumeSetting )
+			nLastVolume++;
+		else if ( nLastVolume > volumeSetting )
+			nLastVolume--;
+		dab.STREAM_SetVolume_Async( nLastVolume, ms );
+
+		terminal.Send("Volume=");
+		terminal.Send(nLastVolume);
+		terminal.SendCRLF();
+
+		return TaskInit::OK;
+	}
 	return TaskInit::Skip;
 }
 
@@ -1168,6 +1187,9 @@ int8_t NextTask()
 		task = -1;
 	return task;
 }
+
+static uint32_t playPollTimer = 0;
+
 
 void DoDAB()
 {
@@ -1273,6 +1295,11 @@ void DoDAB()
 				taskDoneState = RadioState::Playing;
 				break;
 
+			case RadioState::PlayingNext:
+				radioState = RadioState::Playing;
+				playPollTimer = ms + 1000;
+				break;
+
 			case RadioState::Playing:
 				if ( ret == AsyncReturnCode::Notification )
 				{
@@ -1292,17 +1319,29 @@ void DoDAB()
 				}
 				else
 				{
+
 					// Execute Scheduled task lists
 					// every second - radio play status, volume
 					// every 15 seconds - play mode, play index, signal strength, program text
 					// every 5 minutes - clock
-					static uint32_t pollTimer = 0;
-					if ( (int32_t)pollTimer - (int32_t)ms <= 0 )
+					if ( (int32_t)playPollTimer - (int32_t)ms <= 0 )
 					{
-						InitPollTasks(1);
+						const uint16_t LONG_TIME = 5*60;	// clock every 5 minutes.
+						const uint16_t SHORT_TIME = 10;		// clock every 15 seconds.
+						static uint16_t nTicker = LONG_TIME - 30;
+						if ( nTicker == LONG_TIME )
+						{
+							InitPollTasks(3);
+							nTicker = 0;
+						}
+						else if ( nTicker % SHORT_TIME == 0 )
+							InitPollTasks(2);
+						else
+							InitPollTasks(1);
+
+						nTicker++;
 						radioState = RadioState::StartUpTasks;
-						taskDoneState = RadioState::Playing;
-						pollTimer = ms + 15000;
+						taskDoneState = RadioState::PlayingNext;
 					}
 				}
 				break;
@@ -1548,6 +1587,38 @@ void Spinner()
 	}
 }
 
+static uint8_t ConvertVolume( int16_t v )
+{
+	uint16_t sample[] = 
+	{
+	//0,
+	190,
+	210,
+	225,
+	240,
+	260,
+	300,
+	340,
+	390,
+	415,
+	490,
+	650,
+	900,
+	1260,
+	1900,
+	2700,
+	2900,
+	4096
+	};
+
+
+	uint8_t d = 0;
+	while ( sample[d] < v )
+		d++;
+
+	return d;
+}
+
 int main(void)
 {
 	ioinit();
@@ -1694,10 +1765,7 @@ int main(void)
 				n++;
 				if ( n == 16 )
 				{
-					sum >>= 4;
-					//terminal.Send("ADC: ");
-					//terminal.Send(sum);
-					//terminal.SendCRLF();
+					volumeSetting = ConvertVolume(sum >> 4);
 					n = 0;
 					sum = 0;
 				}
