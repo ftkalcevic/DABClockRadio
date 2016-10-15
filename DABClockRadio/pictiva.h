@@ -166,7 +166,7 @@ public:
 
 		send(_CMD_MASTCONF,true); 		send(142,true);
 
-		clearScreen();
+		clearScreen(true);
 	
 		displayMode(DispMode::ON);
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
@@ -218,7 +218,7 @@ public:
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 
-	void clearScreen(void)
+	void clearScreen(bool bWait=false)
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 
@@ -230,8 +230,10 @@ public:
 
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 		
-		_delay_us(400);//increase if there's image flickering
-		//undocumented bug, after this command the SSD0332 needs some time to stabilize
+		if ( bWait )
+		{
+			_delay_us(400); // Wait for the clearscreen to complete.
+		}
 	}
 
 	void displayPowerOff()
@@ -274,7 +276,7 @@ public:
 		send(b);
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
-	void SetColumn(uint8_t start, uint8_t end = 95)
+	void SetColumn(uint8_t start=0, uint8_t end = 95)
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_SETCOLUMN, true );
@@ -282,12 +284,19 @@ public:
 		send( end, true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
-	void SetRow(uint8_t start, uint8_t end=48)
+	void SetRow(uint8_t start=0, uint8_t end=48)
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_SETROW, true );
 		send( start, true );
 		send( end, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+	}
+	void SetFillMode(bool bRectFill, bool bInvertCopy)
+	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		send( _CMD_FILL_MODE, true );
+		send( (bRectFill ? 0x1 : 0 ) | (bInvertCopy ? 0x10 : 0), true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
 
@@ -313,6 +322,10 @@ public:
 	// Write a line of text.  No clipping or boundary checking.  Monospace.
 	void WriteText( const FontStruct * font, int16_t x, int8_t y, const char *s, uint8_t colour = 0x3F )
 	{
+		// On the screen?
+		if ( y + font->rows < 0 || y > OP_SCREENH )
+			return;
+
 		uint8_t slen = strlen(s);
 		uint16_t plen = slen * (font->cols + 1);
 
@@ -321,7 +334,13 @@ public:
 		div_t end = div(x+plen,3);
 
 		// bounding rectangle
-		SetRow( y, y+font->rows-1 );
+		int8_t sy = y;
+		int8_t ey = y+font->rows-1;
+		if ( sy < 0 )
+			sy = 0;
+		if ( ey >= OP_SCREENH )
+			ey = OP_SCREENH - 1;
+		SetRow( sy, ey );
 
 		int16_t xe = end.quot + (end.rem ? 1 : 0) - 1;
 		if ( xe >= OP_SCREENW/3 )
@@ -335,47 +354,139 @@ public:
 		int16_t startx = (start.quot + (start.rem < 0 ? -1 : 0 ))*3;
 		if ( start.rem < 0 )
 			start.rem += 3;
-		for ( uint8_t row = 0; row < font->rows; row++ )
+		for ( uint8_t row = 0; row < font->rows; row++, y++ )
 		{
-			const char *ptr = s;
-			uint8_t p = 0;
-			int16_t px = startx;
-
-			// Leading pixels
-			for ( ; p < start.rem; p++, px++ )
-				if ( px >= 0 )
-					PutPixel( 0, p );
-
-			// text
-			while ( *ptr && px < OP_SCREENW )
+			if ( y >=0 && y < OP_SCREENH )
 			{
-				uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
-				for ( uint8_t c = 0; c < font->cols && px < OP_SCREENW; c++ )
-				{
+				const char *ptr = s;
+				uint8_t p = 0;
+				int16_t px = startx;
+
+				// Leading pixels
+				for ( ; p < start.rem; p++, px++ )
 					if ( px >= 0 )
-						PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
-					p++;
-					px++;
-					if (p==3) p = 0;
+						PutPixel( 0, p );
+
+				// text
+				while ( *ptr && px < OP_SCREENW )
+				{
+					uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
+					for ( uint8_t c = 0; c < font->cols && px < OP_SCREENW; c++ )
+					{
+						if ( px >= 0 )
+							PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
+						p++;
+						px++;
+						if (p==3) p = 0;
+					}
+					if ( px < OP_SCREENW )
+					{
+						if ( px >= 0 )
+							PutPixel( 0, p );
+						px++;
+						p++;
+						if (p==3) p = 0;
+					}
+					ptr++;
 				}
-				if ( px < OP_SCREENW )
+
+				// trailing pixels
+				for ( int8_t i = end.rem; i >= 0 && px < OP_SCREENW; i-- )
 				{
 					if ( px >= 0 )
 						PutPixel( 0, p );
 					px++;
 					p++;
-					if (p==3) p = 0;
 				}
-				ptr++;
 			}
+		}
+	}
 
-			// trailing pixels
-			for ( int8_t i = end.rem; i >= 0 && px < OP_SCREENW; i-- )
+	typedef void (*PutPixelFunc)( uint8_t c, uint8_t p);
+	typedef void (*SetRowFunc)(uint8_t start, uint8_t end);
+	typedef void (*SetColFunc)(uint8_t start, uint8_t end);
+
+	// Write a line of text.  No clipping or boundary checking.  Monospace.
+	template< PutPixelFunc funcPutPixel, SetRowFunc funcSetRow, SetColFunc funcSetCol, const int Width, const int Height> void WriteText( const FontStruct * font, int16_t x, int8_t y, const char *s, uint8_t colour = 0x3F )
+	{
+		// On the screen?
+		if ( y + font->rows < 0 || y > Width )
+			return;
+
+		uint8_t slen = strlen(s);
+		uint16_t plen = slen * (font->cols + 1);
+
+		// Because each pixel is made up of 3 dots, we need to shift the physical start/end to 3 pixel boundaries.
+		div_t start = div(x,3);
+		div_t end = div(x+plen,3);
+
+		// bounding rectangle
+		int8_t sy = y;
+		int8_t ey = y+font->rows-1;
+		if ( sy < 0 )
+			sy = 0;
+		if ( ey >= Height )
+			ey = Height - 1;
+		if ( funcSetRow )
+			funcSetRow( sy, ey );
+
+		int16_t xe = end.quot + (end.rem ? 1 : 0) - 1;
+		if ( xe >= Width/3 )
+			xe = Width/3 - 1;
+		int16_t xs = start.quot;
+		if ( xs < 0 )
+			xs = 0;
+		if ( funcSetCol )
+			funcSetCol( xs, xe );
+
+		// output the data into the block, row by row, letting the graphics controller shift lines.
+		int16_t startx = (start.quot + (start.rem < 0 ? -1 : 0 ))*3;
+		if ( start.rem < 0 )
+		start.rem += 3;
+		for ( uint8_t row = 0; row < font->rows; row++, y++ )
+		{
+			if ( y >=0 && y < Height )
 			{
+				const char *ptr = s;
+				uint8_t p = 0;
+				int16_t px = startx;
+
+				// Leading pixels
+				for ( ; p < start.rem; p++, px++ )
 				if ( px >= 0 )
-					PutPixel( 0, p );
-				px++;
-				p++;
+					funcPutPixel( 0, p );
+
+				// text
+				while ( *ptr && px < Width )
+				{
+					uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
+					for ( uint8_t c = 0; c < font->cols && px < OP_SCREENW; c++ )
+					{
+						if ( px >= 0 )
+							funcPutPixel( (bits & _BV(7-c)) ? colour : 0, p );
+						p++;
+						px++;
+						if (p==3) p = 0;
+					}
+					if ( px < Width )
+					{
+						if ( px >= 0 )
+							funcPutPixel( 0, p );
+						px++;
+						p++;
+						if (p==3) p = 0;
+					}
+					ptr++;
+				}
+
+				// trailing pixels
+				for ( int8_t i = end.rem; i >= 0 && px < Width; i-- )
+				{
+					if ( px >= 0 )
+						funcPutPixel( 0, p );
+					px++;
+					p++;
+				}
 			}
 		}
 	}
@@ -456,7 +567,7 @@ public:
 		}
 	}
 
-	void Copy( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye,  uint16_t xd, uint8_t yd )
+	void Copy( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye,  uint16_t xd, uint8_t yd, bool bWait = false )
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_DRAW_COPY, true );
@@ -467,8 +578,22 @@ public:
 		send( xd / 3, true );
 		send( yd, true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+
+		if ( bWait )
+		{
+			// As there is not feedback from the SSD0332, we need to wait for the copy to finish.  The more pixels the long the wait.
+			uint16_t w;
+			w = (xe - xs)>>1;	// Actually 3/2 (3 pixels per 2 bytes) but this just an estimate.
+			w *= (ye - ys);
+			w /= 64;
+			while ( w > 0 )
+			{
+				_delay_us(5);	// argument must be a constant so the delay routine is calculated at compile time.  Otherwise it does floating point math.	
+				w--;
+			}
+		}
 	}
-	void ClearWindow( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye )
+	void ClearWindow( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye, bool bWait = false )
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_DRAW_CLRW, true );
@@ -477,5 +602,112 @@ public:
 		send( xe / 3, true );
 		send( ye, true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+
+		if ( bWait )
+		{
+			// As there is not feedback from the SSD0332, we need to wait for the clear to finish.  The more pixels the long the wait.
+			uint16_t w;
+			w = (xe - xs)>>1;	// Actually 3/2 (3 pixels per 2 bytes) but this just an estimate.
+			w *= (ye - ys);
+			w /= 64;
+			while ( w > 0 )
+			{
+				_delay_us(2);	// argument must be a constant so the delay routine is calculated at compile time.  Otherwise it does floating point math.
+				w--;
+			}
+		}
 	}
+
+	void HLine( int16_t x1, int16_t x2, int8_t y, uint8_t c)
+	{
+		if ( y < 0 || y >= OP_SCREENH )
+			return;
+
+		if ( x1 > x2 )
+		{
+			uint16_t tmp = x1;
+			x1 = x2;
+			x2 = tmp;
+		}
+
+		if ( x1 < 0 )
+			x1 = 0;
+		if ( x2 >= OP_SCREENW )
+			x2 = OP_SCREENW-1;
+
+		// Round to 3 pixels
+		div_t start = div(x1,3);
+		div_t end = div(x2,3);
+
+		SetRow( y, y );
+		SetColumn( start.quot, end.quot + (end.rem ? 1 : 0) - 1 );
+
+		uint8_t p = 0;
+
+		// Leading pixels
+		for ( ; p < start.rem; p++ )
+		{
+			PutPixel( 0, p );
+		}
+
+		for ( int16_t x = x1; x <= x2; x++ )
+		{
+			PutPixel( c, p );
+			p++;
+			if ( p == 3 ) p = 0;
+		}
+		// trailing pixels
+		for ( int8_t i = end.rem; i >= 0; i-- )
+		{
+			PutPixel( 0, p );
+			p++;
+		}
+	}
+
+	uint16_t PixelData( uint8_t c1, uint8_t c2, uint8_t c3 )
+	{
+		uint16_t pixel;
+		pixel = (c1>>1) << 11;
+		pixel |= c2 << 5;
+		pixel |= c3>>1;
+		return pixel;
+	}
+
+	void VLine( uint16_t x, uint8_t y1, uint8_t y2, uint8_t c)
+	{
+		if ( x < 0 || x >= OP_SCREENW )
+			return;
+
+		if ( y1 > y2 )
+		{
+			int8_t tmp = y1;
+			y1 = y2;
+			y2 = tmp;
+		}
+
+		if ( y1 < 0 )
+			y1 = 0;
+		if ( y2 >= OP_SCREENH )
+			y2 = OP_SCREENH-1;
+
+		// We always write 2 bytes, 3 pixels.  Find which one is on.
+		div_t pixel = div(x,3);
+
+		uint16_t data;
+		if ( pixel.rem == 0 )
+			data = PixelData( c, 0, 0 );
+		else if ( pixel.rem == 1 )
+			data = PixelData( 0, c, 0 );
+		else
+			data = PixelData( 0, 0, c );
+
+		SetRow( y1, y2-1 );
+		SetColumn( pixel.quot, pixel.quot );
+
+		for ( int8_t y = y1; y <= y2; y++ )
+		{
+			_sendData( data );
+		}
+	}
+
 };

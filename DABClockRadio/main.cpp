@@ -60,6 +60,17 @@ static uint32_t radioTimer;
 static void ScrollText(bool bRedraw=false);
 
 
+
+// Display mode - what is the display showing.
+enum class DisplayMode: uint8_t
+{
+	Off,
+	Playing,
+	Tuner,
+	Menu
+} displayMode = DisplayMode::Off;
+
+
 // Program Info
 struct Programs
 {
@@ -174,108 +185,43 @@ static void ShowTime( long nSeconds )
 
 static void ShowDate()
 {
-	struct tm t;
+	if ( displayMode == DisplayMode::Playing )
+	{
+		struct tm t;
 
-	gmtime_r((time_t*)&clock_secs, &t);
+		gmtime_r((time_t*)&clock_secs, &t);
 
 	
-	char s[16];	//Thu 20 Dec 2016
-	memset( s, ' ', sizeof(s) );
-	uint8_t n = 0;
+		char s[16];	//Thu 20 Dec 2016
+		memset( s, ' ', sizeof(s) );
+		uint8_t n = 0;
 
-	const char *WeekDay = "SunMonTueWedThuFriSat";
-	s[n++] = WeekDay[t.tm_wday*3+0];
-	s[n++] = WeekDay[t.tm_wday*3+1];
-	s[n++] = WeekDay[t.tm_wday*3+2];
-	n++;
+		const char *WeekDay = "SunMonTueWedThuFriSat";
+		s[n++] = WeekDay[t.tm_wday*3+0];
+		s[n++] = WeekDay[t.tm_wday*3+1];
+		s[n++] = WeekDay[t.tm_wday*3+2];
+		n++;
 
-	if ( t.tm_mday >= 10 )
-		s[n++] = '0' + (t.tm_mday / 10 );
-	s[n++] =  '0' + (t.tm_mday % 10 );
-	n++;
+		if ( t.tm_mday >= 10 )
+			s[n++] = '0' + (t.tm_mday / 10 );
+		s[n++] =  '0' + (t.tm_mday % 10 );
+		n++;
 
-	const char *Month = "JanFebMarAprMayJunJulAugSepOctNovDec";
-	s[n++] = Month[t.tm_mon*3+0];
-	s[n++] = Month[t.tm_mon*3+1];
-	s[n++] = Month[t.tm_mon*3+2];
-	n++;
+		const char *Month = "JanFebMarAprMayJunJulAugSepOctNovDec";
+		s[n++] = Month[t.tm_mon*3+0];
+		s[n++] = Month[t.tm_mon*3+1];
+		s[n++] = Month[t.tm_mon*3+2];
+		n++;
 
-	uint16_t y = t.tm_year + 1900;
-	s[n++] = '0' + y/1000;
-	s[n++] = '0' + (y%1000)/100;
-	s[n++] = '0' + (y%100)/10;
-	s[n++] = '0' + (y%10);
-	s[n] = '\0';
+		uint16_t y = t.tm_year + 1900;
+		s[n++] = '0' + y/1000;
+		s[n++] = '0' + (y%1000)/100;
+		s[n++] = '0' + (y%100)/10;
+		s[n++] = '0' + (y%10);
+		s[n] = '\0';
 
-	display.WriteText( &font_6x13, OP_SCREENW - 1 - (font_6x13.cols + 1)*n, 0, s );
-	//terminal.Send( "Tick ");
-	//terminal.Send(t.tm_mday);
-	//terminal.Send('/');
-	//terminal.Send(t.tm_mon);
-	//terminal.Send('/');
-	//terminal.Send(t.tm_year+1900);
-	//terminal.Send(' ');
-	//
-	//if (t.tm_hour < 10 )
-	//terminal.Send(' ');
-	//terminal.Send(t.tm_hour);
-	//terminal.Send( ":");
-	//if ( t.tm_min < 10 )
-	//terminal.Send('0');
-	//terminal.Send(t.tm_min);
-	//terminal.Send( ":");
-	//if ( t.tm_sec < 10 )
-	//terminal.Send('0');
-	//terminal.Send(t.tm_sec);
-	//terminal.SendCRLF();
-
-	static const uint8_t numbertable[] = {
-		0x3F, /* 0 */
-		0x06, /* 1 */
-		0x5B, /* 2 */
-		0x4F, /* 3 */
-		0x66, /* 4 */
-		0x6D, /* 5 */
-		0x7D, /* 6 */
-		0x07, /* 7 */
-		0x7F, /* 8 */
-		0x6F /* 9 */
-	};
-
-	bool pm = false;
-	struct
-	{
-		uint8_t addr;
-		uint8_t row;
-		uint16_t data[5];
-	} data;
-	data.addr = SLAVE_ADDR;
-	data.row = 0;
-	if ( t.tm_hour > 12 )
-	{
-		t.tm_hour -= 12;
-		pm = true;
+		display.WriteText( &font_6x13, OP_SCREENW - 1 - (font_6x13.cols + 1)*n, 0, s );
 	}
-	if ( t.tm_hour == 0 )
-	t.tm_hour = 12;
-	if ( t.tm_hour < 10 )
-	data.data[0] = 0;
-	else
-	{
-		data.data[0] = numbertable[1];
-		t.tm_hour -= 10;
-	}
-	data.data[1] = numbertable[t.tm_hour];
-	//data[2] = (nSeconds & 1) ? 0xFF : 0;
-	data.data[2] = 0xFF;
-
-	data.data[3] = numbertable[t.tm_min/10];
-	data.data[4] = numbertable[t.tm_min%10];
-
-	if ( pm )
-	data.data[4] |= 0x80;
-	
-	sevenSeg_I2C.SendTxn( (uint8_t *)&data, sizeof(data) );
 }
 
 static void UpdateTime( struct tm &t )
@@ -908,7 +854,11 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 		else
 			programs[nProgramIdx].sShortName = sProgramNames;
 
-		sProgramNames += dab.MsgLen();
+		// Remove trailing white space
+		uint8_t i = dab.MsgLen();
+		while ( i > 0 &&  (sProgramNames[i-1] == ' ' || sProgramNames[i-1] == 0 ) )
+			i--;
+		sProgramNames += i;
 		*(sProgramNames++) = '\0';
 		terminal.Send(nProgramIdx);
 		terminal.Send(" ");
@@ -941,7 +891,8 @@ static TaskInit funcPlayProgram_init()
 	terminal.Send("ProgramName: ");
 	terminal.Send(sProgram);
 	terminal.SendCRLF();
-	display.WriteText( &font_MSShell, 0, 0, sProgram );
+	if (  displayMode == DisplayMode::Playing )
+		display.WriteText( &font_MSShell, 0, 0, sProgram );
 	//display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
 	
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
@@ -1359,12 +1310,113 @@ static enum class ClockRadioState: uint8_t
 } clockRadioState = ClockRadioState::Off;
 
 
+static uint16_t nTunerDisplayProgram;
+static int16_t nTunerDelta;
+const uint16_t SELECTOR_WIDTH = 60;
+
+void InitTunerDisplay()
+{
+	display.clearScreen(true);
+	nTunerDisplayProgram = nLastPlayedProgram;
+	nTunerDelta = nLastPlayedProgram * 4;
+
+	uint8_t y = 12 + 12/2;
+	 
+	// Put current station in the center of the screen. 4 rows?
+	for ( int16_t n = -2; n <= 2; n++ )
+	{
+		int16_t nProg = nTunerDisplayProgram + n;
+		if ( nProg >= 0 && nProg < nPrograms )
+		{
+			uint16_t len = strlen( programs[nProg].sLongName ) * (font_6x13.cols+1) - 1;
+			display.WriteText( &font_6x13, OP_SCREENW/2-len/2,y+12*n, programs[nProg].sLongName );
+		}
+	}
+
+	// Selection box
+/////#define TUNER_BORDER
+#ifdef TUNER_BORDER
+	display.VLine( OP_SCREENW/2-SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
+	display.VLine( OP_SCREENW/2+SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
+	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y-1, 0x3F );
+	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y+12-1, 0x3F );
+#else
+	display.SetRow(); display.SetColumn();
+	display.SetFillMode( false, true );
+	display.Copy( OP_SCREENW/2-SELECTOR_WIDTH,y-1, OP_SCREENW/2+SELECTOR_WIDTH,y+12-2, OP_SCREENW/2-SELECTOR_WIDTH,y-1, true );
+	display.SetFillMode( false, false );
+#endif	
+}
+
+
+void UpdateTunerDisplay(int8_t delta)
+{
+	nTunerDelta += delta;
+	if ( nTunerDelta < 0 )
+		nTunerDelta = 0;
+	else if ( nTunerDelta > 4*(nPrograms-1) )
+		nTunerDelta = 4*(nPrograms-1);
+
+	if ( nTunerDelta/4 == nTunerDisplayProgram )
+		return;
+
+	nTunerDisplayProgram = nTunerDelta/4;
+
+	display.ClearWindow(OP_SCREENW/2-SELECTOR_WIDTH,0,OP_SCREENW/2+SELECTOR_WIDTH,OP_SCREENH, true);
+	
+	uint8_t y = 12 + 12/2;
+	// Put current station in the center of the screen. 4 rows?
+	for ( int16_t n = -2; n <= 2; n++ )
+	{
+		int16_t nProg = nTunerDisplayProgram + n;
+		if ( nProg >= 0 && nProg < nPrograms )
+		{
+			uint16_t len = strlen( programs[nProg].sLongName ) * (font_6x13.cols+1) - 1;
+			display.WriteText( &font_6x13, OP_SCREENW/2-len/2,y+12*n, programs[nProg].sLongName );
+		}
+	}
+
+
+	// Selection box
+/////#define TUNER_BORDER
+#ifdef TUNER_BORDER
+	display.VLine( OP_SCREENW/2-SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
+	display.VLine( OP_SCREENW/2+SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
+	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y-1, 0x3F );
+	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y+12-1, 0x3F );
+#else
+	display.SetRow(); display.SetColumn();
+	display.SetFillMode( false, true );
+	display.Copy( OP_SCREENW/2-SELECTOR_WIDTH,y-1, OP_SCREENW/2+SELECTOR_WIDTH,y+12-2, OP_SCREENW/2-SELECTOR_WIDTH,y-1, true );
+	display.SetFillMode( false, false );
+#endif	
+}
+
+static void Tuner( int16_t shift )
+{
+	switch ( displayMode )
+	{
+		case DisplayMode::Off:
+			break;
+		case DisplayMode::Menu:
+			break;
+		case DisplayMode::Playing:
+			// Move from Playing display to Tuner (select program)
+			InitTunerDisplay();
+			displayMode = DisplayMode::Tuner;
+			break;
+		case DisplayMode::Tuner:
+			UpdateTunerDisplay(shift);
+			break;
+		}
+}
 
 static void RadioPlay()
 {
 	if ( radioState == RadioState::Off )
 	{
 		dab.AsyncStart();
+		displayMode = DisplayMode::Playing;
 		display.InitDisplay();
 		ShowDate();
 		radioState = RadioState::StartPlaying;
@@ -1451,7 +1503,7 @@ static void ScrollText(bool bRedraw)
 		nShiftCount = font_6x13.rows+1;
 		scrollState = ScrollState::shiftingOut;
 	}
-	if ( ms8 != last_ms8 )
+	if ( ms8 != last_ms8 && displayMode == DisplayMode::Playing )
 	{
 		switch ( scrollState )
 		{
@@ -1517,8 +1569,11 @@ static void ScrollText(bool bRedraw)
 
 }
 
-static void DoClockRadio(uint16_t key_changes)
+
+static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 {
+	static int16_t nLastEncoder = 0;
+
 	switch ( clockRadioState )
 	{
 		case ClockRadioState::Off:
@@ -1529,28 +1584,36 @@ static void DoClockRadio(uint16_t key_changes)
 			break;
 
 		case ClockRadioState::Idle:
-			if ( key_changes & keydown & BTN_RADIO_OFF )
+			if ( key_changes ^ keydown )
 			{
-				RadioOff();
+				if ( key_changes & keydown & BTN_RADIO_OFF )
+				{
+					RadioOff();
+				}
+				else if ( key_changes & keydown & BTN_SNOOZE )
+				{
+					//                      123456789012345678901234567890123456789012345678
+					strcpy( sProgramNames, "This is a message that is less then 48 chars" );
+					ScrollText(true);
+				}
+				else if ( key_changes & keydown & BTN_SLEEP )
+				{
+					//                      123456789012345678901234567890123456789012345678
+					//strcpy( sProgramNames, "This is a message that is well over the 48 characters that can be displayed on the display in one go." );
+					strcpy( sProgramNames, "This is a message." );
+					ScrollText(true);
+				}
+				else if ( key_changes & keydown & BTN_TIME_SET )
+				{
+					//                      123456789012345678901234567890123456789012345678
+					strcpy( sProgramNames, "Another long message; The quick brown fox jumps over the lazy dog." );
+					ScrollText(true);
+				}
 			}
-			else if ( key_changes & keydown & BTN_SNOOZE )
+			else if ( nEncoder != nLastEncoder )
 			{
-				//                      123456789012345678901234567890123456789012345678
-				strcpy( sProgramNames, "This is a message that is less then 48 chars" );
-				ScrollText(true);
-			}
-			else if ( key_changes & keydown & BTN_SLEEP )
-			{
-				//                      123456789012345678901234567890123456789012345678
-				//strcpy( sProgramNames, "This is a message that is well over the 48 characters that can be displayed on the display in one go." );
-				strcpy( sProgramNames, "This is a message." );
-				ScrollText(true);
-			}
-			else if ( key_changes & keydown & BTN_TIME_SET )
-			{
-				//                      123456789012345678901234567890123456789012345678
-				strcpy( sProgramNames, "Another long message; The quick brown fox jumps over the lazy dog." );
-				ScrollText(true);
+				int16_t nEncoderChange = nEncoder - nLastEncoder;
+				Tuner( nEncoderChange );
 			}
 			else
 			{
@@ -1558,10 +1621,13 @@ static void DoClockRadio(uint16_t key_changes)
 			}
 			break;
 	}
+
+	nLastEncoder = nEncoder;
 }
 
 void Spinner()
 {
+	// sin/cos x/y coordinates of the dots. (spaced so the whitespace of the character doesn't touch the neighbouring dots)
 	static struct { uint8_t x; uint8_t y; } pos[] = {
 			{122,20},
 			{125,10},
@@ -1591,24 +1657,24 @@ static uint8_t ConvertVolume( int16_t v )
 {
 	uint16_t sample[] = 
 	{
-	//0,
-	190,
-	210,
-	225,
-	240,
-	260,
-	300,
-	340,
-	390,
-	415,
-	490,
-	650,
-	900,
-	1260,
-	1900,
-	2700,
-	2900,
-	4096
+		//0,
+		190,
+		210,
+		225,
+		240,
+		260,
+		300,
+		340,
+		390,
+		415,
+		490,
+		650,
+		900,
+		1260,
+		1900,
+		2700,
+		2900,
+		4096
 	};
 
 
@@ -1671,24 +1737,6 @@ int main(void)
 				}
 				bFlash = true;
 				terminal.Send("tick\r\n");
-				//if ( clock_secs % 60 == 0 )
-				//{
-					//if ( (clock_secs / 60) & 1 )
-						//display.displayPowerOff();
-					//else
-						//display.InitDisplay();
-				//}
-				
-				//if ( clock_secs % 30 == 0 )
-				//{
-					//if ( radioState == RadioState::Idle && dab.isIdle() )
-					//{
-						//dab.RTC_EnableSyncClock(true);
-						//dab.STREAM_Play( DABPlayMode::DAB, 4 );
-//
-						//PrintDABDetails();								
-					//}
-				//}
 			}
 			else if ( bFlash && (rtc & 2) != 0 )
 			{
@@ -1701,8 +1749,8 @@ int main(void)
 
 		}
 
-		static uint16_t nLastEncoder = -1;
-		uint16_t nEncoder = TCC1.CNT;
+		static int16_t nLastEncoder = -1;
+		int16_t nEncoder = TCC1.CNT;
 		if ( nEncoder != nLastEncoder )
 		{
 			nLastEncoder = nEncoder;
@@ -1710,18 +1758,6 @@ int main(void)
 			terminal.Send( (long)nEncoder );
 			terminal.SendCRLF();
 		}
-
-		//if ( ms % 50 == 0)
-		//{
-			//static uint8_t i = 0;
-			//uint16_t i0 = i>>1;
-			//uint16_t c = i0 | (i << 5) | (i0 << 11);
-			//display.sendData(c >> 8);
-			//display.sendData(c & 0xFF);
-			//i+=2;
-			//if ( i > 0x3F )
-				//i = 0;
-		//}
 
 		uint16_t key_changes;
 		static uint8_t last_ms = -1;
@@ -1738,15 +1774,6 @@ int main(void)
 
 			if ( !bClockInitialised && (ms8 % 20) == 0 )
 				Spinner();
-
-			//display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
-			//display.WriteText( &font_6x13, 287-90, 0, "Mon 10 Oct 2016" );
-			//display.WriteText( &font_6x13, 287-30, 12, "Line2" );
-			//display.WriteText( &font_6x13, 0, 24, "Line3" );
-			//display.WriteText( &font_6x13, 143-15, 24, "Line3" );
-			//display.WriteText( &font_6x13, 287-30, 24, "Line3" );
-			//display.WriteText( &font_6x13, 287-30, 36, "Line4" );
-			//for (;;);
 		}
 
 
@@ -1773,7 +1800,7 @@ int main(void)
 			}
 		}
 
-		DoClockRadio(key_changes);
+		DoClockRadio(key_changes, nEncoder);
 		DoDAB();
 
 		//static int16_t t=0;
@@ -1829,11 +1856,7 @@ DAB
 
 	- fm support?
 
-	- program text side scrolling
-
 	- ldr for autobrightness.
-
-	- volume - analog in 
 
 	-- Menu - when off, encoder scrolls menu.  Use alarm1/2 buttons?
 		-- alarm(s)
@@ -1845,6 +1868,7 @@ DAB
 		-- different display layouts
 		-- other?
 		-- sleep time, snooze time.
+	-- change station
 
 	-- if program count = 0 dab scan (or just menu?)
 */
