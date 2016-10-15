@@ -82,9 +82,16 @@ static uint16_t nPrograms;
 static uint16_t nProgramIdx;
 static char *sProgramNames;
 static uint16_t nLastPlayedProgram = 30; //4; //30;
+static uint16_t nNextProgram;
 static uint16_t nLastVolume = 0;	// What the volume is.
 static uint8_t volumeSetting = 0;	// What to set it to.
 
+
+// Programme text and scrolling.
+#define PROGRAM_TEXT_POS	36
+static char sCurrentProgramText[256];
+static uint16_t textXShift = 0, textXShiftMax;
+static int16_t xoffs;
 
 
 
@@ -181,6 +188,18 @@ static void ShowTime( long nSeconds )
 		data.data[4] |= 0x80;
 	
 	sevenSeg_I2C.SendTxn( (uint8_t *)&data, sizeof(data) );
+}
+
+static void ShowProgram()
+{
+	const char *sProgram = programs[nLastPlayedProgram].sLongName;
+
+	terminal.Send("ProgramName: ");
+	terminal.Send(sProgram);
+	terminal.SendCRLF();
+
+	if (  displayMode == DisplayMode::Playing )
+		display.WriteText( &font_MSShell, 0, 0, sProgram );
 }
 
 static void ShowDate()
@@ -886,15 +905,8 @@ static TaskInit funcPlayProgramForTime_init()
 
 static TaskInit funcPlayProgram_init()
 {
-	const char *sProgram = programs[nLastPlayedProgram].sLongName;
-
-	terminal.Send("ProgramName: ");
-	terminal.Send(sProgram);
-	terminal.SendCRLF();
-	if (  displayMode == DisplayMode::Playing )
-		display.WriteText( &font_MSShell, 0, 0, sProgram );
-	//display.WriteText( &font_MSShell, 0, 0, "RSN Racing&Sport" );
-	
+	ShowProgram();
+	*sCurrentProgramText = 0;
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
 	return TaskInit::OK;
 }
@@ -1006,6 +1018,17 @@ static void InitGetProgramTextTasks()
 	//PollTaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramTextNotify_check };
 }
 
+static TaskInit funcChangeProgram_init() 
+{ 
+	if ( nNextProgram != nLastPlayedProgram )
+	{
+		nLastPlayedProgram = nNextProgram;
+		// TODO store program in eeprom.
+		return funcPlayProgram_init();
+	}
+	return TaskInit::Skip;
+}
+
 static TaskInit funcGetPlayStatus_init() 
 { 
 	dab.STREAM_GetPlayStatus_Async(ms); 
@@ -1114,6 +1137,7 @@ void InitPollTasks(uint8_t nLevel)
 
 	if ( nLevel >= 1 )
 	{
+		TaskList[nTaskCount++] = { funcChangeProgram_init, ack_check };
 		TaskList[nTaskCount++] = { funcGetPlayStatus_init, funcGetPlayStatus_check };
 		TaskList[nTaskCount++] = { funcUpdateVolume_init, funcUpdateVolume_check };
 	}
@@ -1123,6 +1147,10 @@ void InitPollTasks(uint8_t nLevel)
 		TaskList[nTaskCount++] = { funcGetPlayIndex_init, funcGetPlayIndex_check };
 		TaskList[nTaskCount++] = { funcGetSignalStrength_init, funcGetSignalStrength_check };
 		TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
+		//if ( !bClockInitialised )
+		//{
+			//TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
+		//}
 	}
 	if ( nLevel >= 3 )
 	{
@@ -1303,6 +1331,25 @@ void DoDAB()
 	}
 }
 
+static void DrawPlayingMode()
+{
+	display.clearScreen(true);
+	ShowDate();
+	ShowProgram();
+}
+
+static void ChangeDisplayMode( DisplayMode mode )
+{
+	displayMode = mode;
+	switch ( displayMode ) 
+	{
+		case DisplayMode::Playing:
+			DrawPlayingMode();
+			break;
+	}
+}
+
+
 static enum class ClockRadioState: uint8_t
 {
 	Off,
@@ -1310,53 +1357,78 @@ static enum class ClockRadioState: uint8_t
 } clockRadioState = ClockRadioState::Off;
 
 
-static int16_t nTunerPosition, nTunerTarget;
+static uint16_t nTunerPosition, nTunerTarget;
 const int16_t TUNER_WIDTH = 120;	// Multiple of 3
 const int16_t TUNER_WIDTH_WORDS = TUNER_WIDTH/3;	// Multiple of 3
 const int16_t SELECTOR_WIDTH = TUNER_WIDTH/2;
 const int16_t ROW_HEIGHT = 12;
 static uint16_t *paintBuffer;
-static uint16_t paintBuffer_x, paintBuffer_y;
-static uint16_t paintBuffer_xs, paintBuffer_xe;
-static uint16_t paintBuffer_ys, paintBuffer_ye;
 static int8_t nEncoderDelta=0;
 
-static void PutPixel( uint8_t c, uint8_t nPos )
+static void SetPixel( uint16_t *pixel, uint8_t c, uint8_t nPos )
 {
-	static uint16_t pixel;
 	switch ( nPos )
 	{
 		case 0:	
-			pixel = (c>>1) << 11;
+			*pixel |= (c>>1) << 11;
 			break;
 		case 1:
-			pixel |= c << 5;
+			*pixel |= c << 5;
 			break;
 		case 2:
-			pixel |= c>>1;
-			paintBuffer[paintBuffer_x+paintBuffer_y*TUNER_WIDTH_WORDS] = pixel;
-			paintBuffer_x++;
-			if ( paintBuffer_x > paintBuffer_xe )
-			{
-				paintBuffer_x = paintBuffer_xs;
-				paintBuffer_y++;
-			}
+			*pixel |= c>>1;
 			break;
 	}
 }
 
-void SetRow(uint8_t start, uint8_t end)
-{
-	paintBuffer_ys = start;
-	paintBuffer_ye = end;
-	paintBuffer_y = start;
-}
 
-void SetCol(uint8_t start, uint8_t end)
+// Write text to memory buffer.  Optimised version - minimal bounds checking.
+void WriteText( int16_t x, int8_t y, const char *s, uint8_t slen, uint16_t plen )
 {
-	paintBuffer_xs = start;
-	paintBuffer_xe = end;
-	paintBuffer_x = start;
+	const FontStruct * font = &font_6x13;
+	const uint8_t colour = 0x3f;
+
+	// On the screen?
+	if ( y + font->rows < 0 || y > TUNER_WIDTH )
+		return;
+
+	// Because each pixel is made up of 3 dots, we need to shift the physical start/end to 3 pixel boundaries.
+	div_t start = div(x,3);
+
+	if ( start.rem < 0 )
+		start.rem += 3;
+	for ( uint8_t row = 0; row < font->rows; row++, y++ )
+	{
+		if ( y >=0 && y < OP_SCREENH )
+		{
+			const char *ptr = s;
+			uint8_t p = start.rem;
+			uint16_t *screen = paintBuffer + y * TUNER_WIDTH_WORDS + start.quot;
+
+			// text
+			while ( *ptr )
+			{
+				uint8_t bits = pgm_read_byte( font->data + (*ptr - font->first_char) * font->rows + row );
+				for ( uint8_t c = 0; c < font->cols; c++ )
+				{
+					SetPixel( screen, (bits & _BV(7-c)) ? colour : 0, p );
+					p++;
+					if (p==3) 
+					{	
+						p = 0;
+						screen++;
+					}
+				}
+				ptr++;
+				p++;
+				if (p==3)
+				{
+					p = 0;
+					screen++;
+				}
+			}
+		}
+	}
 }
 
 void DrawTuner()
@@ -1376,12 +1448,13 @@ void DrawTuner()
 
 	for ( int16_t n = -2; n <= 2; n++ )
 	{
-		int16_t nProg = program0+n;
+		uint16_t nProg = program0+n;
 		int16_t nProgY = y+n*ROW_HEIGHT-dy;
 		if ( nProg >= 0 && nProg < nPrograms )
 		{
-			uint16_t len = strlen( programs[nProg].sLongName ) * (font_6x13.cols+1) - 1;
-			display.WriteText<PutPixel,SetRow,SetCol,TUNER_WIDTH,OP_SCREENH>( &font_6x13, TUNER_WIDTH/2-len/2,nProgY, programs[nProg].sLongName );
+			uint8_t slen = strlen( programs[nProg].sLongName );
+			uint16_t plen = slen * (font_6x13.cols+1) - 1;
+			WriteText( TUNER_WIDTH/2-plen/2,nProgY, programs[nProg].sLongName, slen, plen );
 		}
 	}
 	// Selection box is always in the middle
@@ -1412,35 +1485,85 @@ void InitTunerDisplay()
 
 void UpdateTunerDisplay(int8_t delta)
 {
+	static uint8_t nEncoderReset = 0;
+	static uint8_t nChannelChange = 0;
+	static uint8_t nInactiveTimer = 0;
+
+	const uint8_t CHANNEL_CHANGE_TIMER = (1000/128);	// ms/128
+	const uint8_t INACTIVE_TIMER = (7500l/128);			// ms/128
+	const uint8_t ENCODER_RESET_TIMER = 250;			// ms
+
 	nEncoderDelta += delta;
+	if ( delta )
+		nEncoderReset = ENCODER_RESET_TIMER;
 
 	while ( nEncoderDelta >= 4 )
 	{
 		nTunerTarget += ROW_HEIGHT;
 		nEncoderDelta -= 4;	// 4 encoder ticks per detent.
+		nChannelChange = CHANNEL_CHANGE_TIMER;
+		nInactiveTimer = INACTIVE_TIMER;
 	}
 	while ( nEncoderDelta <= -4 )
 	{
-		nTunerTarget -= ROW_HEIGHT;
+		if ( nTunerTarget < ROW_HEIGHT )
+			nTunerTarget = 0;
+		else
+			nTunerTarget -= ROW_HEIGHT;
 		nEncoderDelta += 4;	// 4 encoder ticks per detent.
+		nChannelChange = CHANNEL_CHANGE_TIMER;
+		nInactiveTimer = INACTIVE_TIMER;
 	}
 
-	if ( nTunerTarget < 0 )
-		nTunerTarget = 0;
-	else if ( nTunerTarget  > ROW_HEIGHT*(nPrograms-1) )
+	if ( nTunerTarget  > ROW_HEIGHT*(nPrograms-1) )
 		nTunerTarget  = ROW_HEIGHT*(nPrograms-1);
 
-	if ( delta != 0 )
+	//if ( delta != 0 )
+	//{	
+		//terminal.Send("Encoder ");
+		//terminal.Send(delta);
+		//terminal.Send(",");
+		//terminal.Send(nEncoderDelta);
+		//terminal.Send(",");
+		//terminal.Send(nTunerTarget);
+		//terminal.Send(",");
+		//terminal.Send(nTunerPosition);
+		//terminal.SendCRLF();	
+	//}
+
+	static uint8_t last_ms8 = 0;
+	uint8_t ms8 = *(uint8_t *)&ms;
+	if ( ms8 != last_ms8 )
 	{
-		terminal.Send("Encoder ");
-		terminal.Send(delta);
-		terminal.Send(",");
-		terminal.Send(nEncoderDelta);
-		terminal.Send(",");
-		terminal.Send(nTunerTarget);
-		terminal.Send(",");
-		terminal.Send(nTunerPosition);
-		terminal.SendCRLF();	
+		last_ms8 = ms8;
+
+		// Clear the encoder count of funny results, not resting on even multiple of 4.
+		if ( nEncoderReset )
+		{
+			nEncoderReset--;
+			if ( nEncoderReset == 0 )
+				nEncoderDelta =0;
+		}	
+
+		if ( (ms8 & 0x7f) == 0 )	// every 128ms
+		{
+			if ( nChannelChange )
+			{
+				nChannelChange--;
+				if ( nChannelChange == 0 )
+				{
+					nNextProgram = nTunerTarget / ROW_HEIGHT;
+				}
+			}
+			if ( nInactiveTimer )
+			{
+				nInactiveTimer--;
+				if ( nInactiveTimer == 0 )
+				{
+					ChangeDisplayMode( DisplayMode::Playing );
+				}
+			}
+		}
 	}
 
 	if ( nTunerTarget == nTunerPosition )
@@ -1450,8 +1573,6 @@ void UpdateTunerDisplay(int8_t delta)
 		nTunerPosition++;
 	else if ( nTunerPosition > nTunerTarget )
 		nTunerPosition--;
-
-
 
 	DrawTuner();
 }
@@ -1499,16 +1620,10 @@ static void RadioOff()
 	}
 }
 
-#define PROGRAM_TEXT_POS	36
-
-static uint16_t textXShift = 0, textXShiftMax;
-static int16_t xoffs;
-static char sText[256];
-
 static bool DrawProgramText(bool bNewText)
 {
 	bool bShifting = false;
-	uint8_t len = strlen(sText);
+	uint8_t len = strlen(sCurrentProgramText);
 
 	if ( bNewText )
 	{
@@ -1528,7 +1643,7 @@ static bool DrawProgramText(bool bNewText)
 	if ( xoffs >= 0 )
 	{
 		if ( bNewText )
-			display.WriteText( &font_6x13, xoffs, PROGRAM_TEXT_POS, sText);
+			display.WriteText( &font_6x13, xoffs, PROGRAM_TEXT_POS, sCurrentProgramText);
 	}
 	else 
 	{
@@ -1536,7 +1651,7 @@ static bool DrawProgramText(bool bNewText)
 		{
 			div_t offs = div( textXShift, font_6x13.cols+1 );
 
-			display.WriteText( &font_6x13, -offs.rem, PROGRAM_TEXT_POS, sText+offs.quot);
+			display.WriteText( &font_6x13, -offs.rem, PROGRAM_TEXT_POS, sCurrentProgramText+offs.quot);
 			textXShift++;
 			bShifting = true;
 		}
@@ -1562,8 +1677,8 @@ static void ScrollText(bool bRedraw)
 
 	if ( bRedraw )
 	{
-		strncpy( sText, sProgramNames, sizeof(sText) );
-		sText[sizeof(sText)-1] = '\0';
+		strncpy( sCurrentProgramText, sProgramNames, sizeof(sCurrentProgramText) );
+		sCurrentProgramText[sizeof(sCurrentProgramText)-1] = '\0';
 		nShiftCount = font_6x13.rows+1;
 		scrollState = ScrollState::shiftingOut;
 	}
@@ -1648,7 +1763,7 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 			break;
 
 		case ClockRadioState::Idle:
-			if ( key_changes ^ keydown )
+			//if ( key_changes ^ keydown )
 			{
 				if ( key_changes & keydown & BTN_RADIO_OFF )
 				{
@@ -1723,7 +1838,7 @@ void Spinner()
 
 static uint8_t ConvertVolume( int16_t v )
 {
-	uint16_t sample[] = 
+	int16_t sample[] = 
 	{
 		//0,
 		190,
@@ -1778,6 +1893,8 @@ int main(void)
 
 	programs = (Programs *)__malloc_heap_start;
 
+	nNextProgram = nLastPlayedProgram;
+
 	uint16_t last_tick = 0;
 	bool bFlash = true;
 	ShowTime(clock_secs);
@@ -1827,7 +1944,7 @@ int main(void)
 			terminal.SendCRLF();
 		}
 
-		uint16_t key_changes;
+		uint16_t key_changes=0;
 		static uint8_t last_ms = -1;
 		uint8_t ms8 = *(uint8_t *)&ms;
 		if ( last_ms != ms8 )
