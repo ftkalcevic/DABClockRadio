@@ -1310,86 +1310,150 @@ static enum class ClockRadioState: uint8_t
 } clockRadioState = ClockRadioState::Off;
 
 
-static uint16_t nTunerDisplayProgram;
-static int16_t nTunerDelta;
-const uint16_t SELECTOR_WIDTH = 60;
+static int16_t nTunerPosition, nTunerTarget;
+const int16_t TUNER_WIDTH = 120;	// Multiple of 3
+const int16_t TUNER_WIDTH_WORDS = TUNER_WIDTH/3;	// Multiple of 3
+const int16_t SELECTOR_WIDTH = TUNER_WIDTH/2;
+const int16_t ROW_HEIGHT = 12;
+static uint16_t *paintBuffer;
+static uint16_t paintBuffer_x, paintBuffer_y;
+static uint16_t paintBuffer_xs, paintBuffer_xe;
+static uint16_t paintBuffer_ys, paintBuffer_ye;
+static int8_t nEncoderDelta=0;
 
-void InitTunerDisplay()
+static void PutPixel( uint8_t c, uint8_t nPos )
 {
-	display.clearScreen(true);
-	nTunerDisplayProgram = nLastPlayedProgram;
-	nTunerDelta = nLastPlayedProgram * 4;
+	static uint16_t pixel;
+	switch ( nPos )
+	{
+		case 0:	
+			pixel = (c>>1) << 11;
+			break;
+		case 1:
+			pixel |= c << 5;
+			break;
+		case 2:
+			pixel |= c>>1;
+			paintBuffer[paintBuffer_x+paintBuffer_y*TUNER_WIDTH_WORDS] = pixel;
+			paintBuffer_x++;
+			if ( paintBuffer_x > paintBuffer_xe )
+			{
+				paintBuffer_x = paintBuffer_xs;
+				paintBuffer_y++;
+			}
+			break;
+	}
+}
 
-	uint8_t y = 12 + 12/2;
-	 
-	// Put current station in the center of the screen. 4 rows?
+void SetRow(uint8_t start, uint8_t end)
+{
+	paintBuffer_ys = start;
+	paintBuffer_ye = end;
+	paintBuffer_y = start;
+}
+
+void SetCol(uint8_t start, uint8_t end)
+{
+	paintBuffer_xs = start;
+	paintBuffer_xe = end;
+	paintBuffer_x = start;
+}
+
+void DrawTuner()
+{
+	uint16_t buffer[TUNER_WIDTH_WORDS * OP_SCREENH ];
+	paintBuffer = buffer;
+	memset( buffer, 0, sizeof(buffer) );
+
+	// nTunerPosition is the "pixel" offset to the program we want to display.
+	// ie 0 - program 0, 12 = program 1, etc (12=ROW_HEIGHT).
+	// 0 is 0 pixels from the middle of the screen row.
+
+	int8_t y = OP_SCREENH /2 - ROW_HEIGHT/2;
+	div_t program = div(nTunerPosition, ROW_HEIGHT );
+	int16_t program0 = program.quot;
+	int8_t dy = program.rem;
+
 	for ( int16_t n = -2; n <= 2; n++ )
 	{
-		int16_t nProg = nTunerDisplayProgram + n;
+		int16_t nProg = program0+n;
+		int16_t nProgY = y+n*ROW_HEIGHT-dy;
 		if ( nProg >= 0 && nProg < nPrograms )
 		{
 			uint16_t len = strlen( programs[nProg].sLongName ) * (font_6x13.cols+1) - 1;
-			display.WriteText( &font_6x13, OP_SCREENW/2-len/2,y+12*n, programs[nProg].sLongName );
+			display.WriteText<PutPixel,SetRow,SetCol,TUNER_WIDTH,OP_SCREENH>( &font_6x13, TUNER_WIDTH/2-len/2,nProgY, programs[nProg].sLongName );
 		}
 	}
+	// Selection box is always in the middle
+	uint16_t *pStart = buffer + (OP_SCREENH /2 - ROW_HEIGHT/2 - 1)*TUNER_WIDTH_WORDS;
+	uint16_t *pEnd = pStart + (ROW_HEIGHT)*TUNER_WIDTH_WORDS;
+	while ( pStart < pEnd )
+	{
+		*pStart = ~*pStart;
+		pStart++;
+	}
 
-	// Selection box
-/////#define TUNER_BORDER
-#ifdef TUNER_BORDER
-	display.VLine( OP_SCREENW/2-SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
-	display.VLine( OP_SCREENW/2+SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
-	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y-1, 0x3F );
-	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y+12-1, 0x3F );
-#else
-	display.SetRow(); display.SetColumn();
-	display.SetFillMode( false, true );
-	display.Copy( OP_SCREENW/2-SELECTOR_WIDTH,y-1, OP_SCREENW/2+SELECTOR_WIDTH,y+12-2, OP_SCREENW/2-SELECTOR_WIDTH,y-1, true );
-	display.SetFillMode( false, false );
-#endif	
+	display.SetRow();
+	display.SetColumn((OP_SCREENW/2-TUNER_WIDTH/2)/3,(OP_SCREENW/2+TUNER_WIDTH/2)/3-1);
+	display.sendData( buffer, countof(buffer) );
+}
+
+void InitTunerDisplay()
+{
+	display.clearScreen(false);
+
+	nTunerPosition = nLastPlayedProgram * ROW_HEIGHT;	// We use pixel scrolling postions
+	nTunerTarget = nTunerPosition;
+	nEncoderDelta=0;
+
+	DrawTuner();
 }
 
 
 void UpdateTunerDisplay(int8_t delta)
 {
-	nTunerDelta += delta;
-	if ( nTunerDelta < 0 )
-		nTunerDelta = 0;
-	else if ( nTunerDelta > 4*(nPrograms-1) )
-		nTunerDelta = 4*(nPrograms-1);
+	nEncoderDelta += delta;
 
-	if ( nTunerDelta/4 == nTunerDisplayProgram )
-		return;
-
-	nTunerDisplayProgram = nTunerDelta/4;
-
-	display.ClearWindow(OP_SCREENW/2-SELECTOR_WIDTH,0,OP_SCREENW/2+SELECTOR_WIDTH,OP_SCREENH, true);
-	
-	uint8_t y = 12 + 12/2;
-	// Put current station in the center of the screen. 4 rows?
-	for ( int16_t n = -2; n <= 2; n++ )
+	while ( nEncoderDelta >= 4 )
 	{
-		int16_t nProg = nTunerDisplayProgram + n;
-		if ( nProg >= 0 && nProg < nPrograms )
-		{
-			uint16_t len = strlen( programs[nProg].sLongName ) * (font_6x13.cols+1) - 1;
-			display.WriteText( &font_6x13, OP_SCREENW/2-len/2,y+12*n, programs[nProg].sLongName );
-		}
+		nTunerTarget += ROW_HEIGHT;
+		nEncoderDelta -= 4;	// 4 encoder ticks per detent.
+	}
+	while ( nEncoderDelta <= -4 )
+	{
+		nTunerTarget -= ROW_HEIGHT;
+		nEncoderDelta += 4;	// 4 encoder ticks per detent.
 	}
 
+	if ( nTunerTarget < 0 )
+		nTunerTarget = 0;
+	else if ( nTunerTarget  > ROW_HEIGHT*(nPrograms-1) )
+		nTunerTarget  = ROW_HEIGHT*(nPrograms-1);
 
-	// Selection box
-/////#define TUNER_BORDER
-#ifdef TUNER_BORDER
-	display.VLine( OP_SCREENW/2-SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
-	display.VLine( OP_SCREENW/2+SELECTOR_WIDTH, y-1, y+12-1, 0x3F );
-	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y-1, 0x3F );
-	display.HLine( OP_SCREENW/2-SELECTOR_WIDTH,OP_SCREENW/2+SELECTOR_WIDTH, y+12-1, 0x3F );
-#else
-	display.SetRow(); display.SetColumn();
-	display.SetFillMode( false, true );
-	display.Copy( OP_SCREENW/2-SELECTOR_WIDTH,y-1, OP_SCREENW/2+SELECTOR_WIDTH,y+12-2, OP_SCREENW/2-SELECTOR_WIDTH,y-1, true );
-	display.SetFillMode( false, false );
-#endif	
+	if ( delta != 0 )
+	{
+		terminal.Send("Encoder ");
+		terminal.Send(delta);
+		terminal.Send(",");
+		terminal.Send(nEncoderDelta);
+		terminal.Send(",");
+		terminal.Send(nTunerTarget);
+		terminal.Send(",");
+		terminal.Send(nTunerPosition);
+		terminal.SendCRLF();	
+	}
+
+	if ( nTunerTarget == nTunerPosition )
+		return;
+
+	if ( nTunerPosition < nTunerTarget )
+		nTunerPosition++;
+	else if ( nTunerPosition > nTunerTarget )
+		nTunerPosition--;
+
+
+
+	DrawTuner();
 }
 
 static void Tuner( int16_t shift )
@@ -1610,13 +1674,17 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 					ScrollText(true);
 				}
 			}
-			else if ( nEncoder != nLastEncoder )
+			if ( nEncoder != nLastEncoder )
 			{
 				int16_t nEncoderChange = nEncoder - nLastEncoder;
 				Tuner( nEncoderChange );
 			}
 			else
 			{
+				if ( displayMode == DisplayMode::Tuner )
+				{
+					Tuner(0);
+				}
 				ScrollText();
 			}
 			break;

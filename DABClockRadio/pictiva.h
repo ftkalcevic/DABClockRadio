@@ -270,6 +270,20 @@ public:
 
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
+
+	void sendData(uint16_t *buffer, uint16_t len)
+	{
+		PICTIVA_D_C_PORT.OUTSET = PICTIVA_D_C;
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		while ( len )
+		{
+			_send(*((uint8_t *)buffer+1));
+			_send(*((uint8_t *)buffer));
+			buffer++;
+			len--;
+		}
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+	}
 	void sendData(uint8_t b)
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
@@ -284,7 +298,7 @@ public:
 		send( end, true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
-	void SetRow(uint8_t start=0, uint8_t end=48)
+	void SetRow(uint8_t start=0, uint8_t end=47)
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
 		send( _CMD_SETROW, true );
@@ -427,8 +441,7 @@ public:
 			sy = 0;
 		if ( ey >= Height )
 			ey = Height - 1;
-		if ( funcSetRow )
-			funcSetRow( sy, ey );
+		funcSetRow( sy, ey );
 
 		int16_t xe = end.quot + (end.rem ? 1 : 0) - 1;
 		if ( xe >= Width/3 )
@@ -436,13 +449,12 @@ public:
 		int16_t xs = start.quot;
 		if ( xs < 0 )
 			xs = 0;
-		if ( funcSetCol )
-			funcSetCol( xs, xe );
+		funcSetCol( xs, xe );
 
 		// output the data into the block, row by row, letting the graphics controller shift lines.
 		int16_t startx = (start.quot + (start.rem < 0 ? -1 : 0 ))*3;
 		if ( start.rem < 0 )
-		start.rem += 3;
+			start.rem += 3;
 		for ( uint8_t row = 0; row < font->rows; row++, y++ )
 		{
 			if ( y >=0 && y < Height )
