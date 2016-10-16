@@ -8,13 +8,14 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
+#include <avr/eeprom.h>
 #include <util/delay.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "..\images\font.h"
 
-#include "time.h"
 #include "ic2_7seg.h"
 #include "serial.h"
 #include "pictiva.h"
@@ -53,13 +54,50 @@ static CSerial< CSerialImpl<CMegaSerialC0,64,64>
 > terminal;
 IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
 
-static uint32_t clock_secs = 0;
+#define SET_CLOCK_TIMEOUT	300	// Try to set the clock for 5 minutes
+static time_t clock_secs = 0;
 static bool bClockInitialised=false;
+static bool bDABClockEnabled = false;
 static uint32_t radioTimer;
 
 static void ScrollText(bool bRedraw=false);
+static void PrimeAlarms();
+static void AlarmOff();
 
 
+enum class AlarmType: uint8_t
+{
+	OneOff,
+	Scheduled
+};
+
+struct Alarm
+{
+	bool bEnabled;
+	AlarmType type;
+	// program ? -1: beeper
+	union
+	{
+		struct 
+		{
+			time_t nTime;				// seconds since 1970
+		};
+		struct  
+		{
+			uint8_t dow;			// Days of week bitmask: bit 0 is sunday.
+			uint16_t nTimeOfDay;	// minutes since midnight.
+		};
+	};
+};
+
+#define MAX_ALARMS	10
+static Alarm alarms[MAX_ALARMS];
+static time_t nNextAlarmDue;
+static time_t nAlarmOffTime = 0;
+static bool bAlarmOn = false;
+static uint8_t nAlarmRunTime;	// in minutes
+static uint8_t nSleepTime;		// in minutes
+static uint8_t nSnoozeTime;		// in minutes
 
 // Display mode - what is the display showing.
 enum class DisplayMode: uint8_t
@@ -83,7 +121,7 @@ static uint16_t nProgramIdx;
 static char *sProgramNames;
 static uint16_t nLastPlayedProgram = 30; //4; //30;
 static uint16_t nNextProgram;
-static uint16_t nLastVolume = 0;	// What the volume is.
+static uint8_t nLastVolume = 0;	// What the volume is.
 static uint8_t volumeSetting = 0;	// What to set it to.
 
 
@@ -92,6 +130,13 @@ static uint8_t volumeSetting = 0;	// What to set it to.
 static char sCurrentProgramText[256];
 static uint16_t textXShift = 0, textXShiftMax;
 static int16_t xoffs;
+
+
+uint16_t eeProgram EEMEM;
+uint8_t eeAlarmRunTime EEMEM;	// in minutes
+uint8_t eeSleepTime EEMEM;		// in minutes
+uint8_t eeSnoozeTime EEMEM;		// in minutes
+Alarm eeAlarms[MAX_ALARMS] EEMEM;
 
 
 
@@ -215,6 +260,9 @@ static void ShowDate()
 		memset( s, ' ', sizeof(s) );
 		uint8_t n = 0;
 
+		if ( t.tm_mday < 10 )
+			n++;
+
 		const char *WeekDay = "SunMonTueWedThuFriSat";
 		s[n++] = WeekDay[t.tm_wday*3+0];
 		s[n++] = WeekDay[t.tm_wday*3+1];
@@ -248,8 +296,11 @@ static void UpdateTime( struct tm &t )
 	uint32_t seconds = mk_gmtime(&t);
 	if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
 	{
-		terminal.Send( "Setting time\r\n" );
+		terminal.Send( "Setting time: " );
+		terminal.Send( (long)seconds );
+		terminal.SendCRLF();
 		clock_secs = seconds;
+		PrimeAlarms();
 		ShowTime(clock_secs);
 		bClockInitialised = true;
 	}
@@ -784,10 +835,22 @@ static TaskReturn funcGetClockStatus_check(AsyncReturnCode ret)
 	{
 		bEnabled = dab.MsgBuffer()[0] != 0;
 	}
+	if ( bEnabled )
+		bDABClockEnabled = bEnabled;
 	return bEnabled ? TaskReturn::Done : TaskReturn::Fail;
 #else
+	PrimeAlarms();
 	return TaskReturn::Done;
 #endif
+}
+
+static TaskReturn funcGetClockStatusOptional_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		bDABClockEnabled = dab.MsgBuffer()[0] != 0;
+	}
+	return TaskReturn::Done;
 }
 
 static TaskInit funcGetClockStatus_init()
@@ -796,11 +859,15 @@ static TaskInit funcGetClockStatus_init()
 	return TaskInit::OK;
 }
 
-// TODO - call this every 5 minutes or so to verify the time.
 static TaskInit funcGetClock_init()
 {
-	dab.RTC_GetClock_Async(ms);
-	return TaskInit::OK;
+	if ( bDABClockEnabled )
+	{
+		dab.RTC_GetClock_Async(ms);
+		return TaskInit::OK;
+	}
+	else
+		return TaskInit::Skip;
 }
 
 static TaskReturn funcGetClock_check(AsyncReturnCode ret)
@@ -817,7 +884,21 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 		t.tm_min = input[1];
 		t.tm_sec = input[0];
 
-		UpdateTime( t );
+		// Quick sanity check
+		if ( t.tm_year > 115 && t.tm_year < 200 &&
+			 t.tm_mon < 12 &&
+			 t.tm_mday > 0 && t.tm_mday <= 31 &&
+			 t.tm_hour < 24 &&
+			 t.tm_min < 60 &&
+			 t.tm_sec < 60 )
+		{
+			UpdateTime( t );
+		}
+		else
+		{
+			terminal.Send("Dud time");
+			return TaskReturn::Fail;
+		}
 
 		if ( radioState != RadioState::Off )
 			ShowDate();
@@ -825,7 +906,12 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 		return TaskReturn::Done;
 	}
 	else
-		return TaskReturn::Fail;	
+	{
+		if ( clock_secs > SET_CLOCK_TIMEOUT )
+			return TaskReturn::Done;	// give up
+		else
+			return TaskReturn::Fail;	
+	}
 }
 
 static TaskReturn funcGetClock_Optional_check(AsyncReturnCode ret)
@@ -921,6 +1007,7 @@ static TaskInit funcPowerOff_init()
 {
 	dab.PowerOff();
 	display.displayPowerOff();
+	bDABClockEnabled = false;
 	return TaskInit::OK;
 }
 
@@ -1155,6 +1242,7 @@ void InitPollTasks(uint8_t nLevel)
 	if ( nLevel >= 3 )
 	{
 		TaskList[nTaskCount++] = { funcEnableSyncClock_init, ack_check };
+		TaskList[nTaskCount++] = { funcGetClockStatus_init, funcGetClockStatusOptional_check };
 		TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
 	}
 }
@@ -1609,14 +1697,25 @@ static void RadioPlay()
 	}
 }
 
+static void RadioSleep()
+{
+	RadioPlay();
+	bAlarmOn = true;	// fake alarm
+	nAlarmOffTime = clock_secs + nSleepTime*60;
+}
+
+
 static void RadioOff()
 {
 	if ( radioState != RadioState::Off )
 	{
 		dab.PowerOff();
 		display.displayPowerOff();
+		bDABClockEnabled = false;
 		radioState = RadioState::Off;
 		clockRadioState = ClockRadioState::Off;
+		*sCurrentProgramText = 0;
+		bAlarmOn = false;
 	}
 }
 
@@ -1684,6 +1783,7 @@ static void ScrollText(bool bRedraw)
 	}
 	if ( ms8 != last_ms8 && displayMode == DisplayMode::Playing )
 	{
+		if ( (ms8 & 7) == 0 )
 		switch ( scrollState )
 		{
 			case ScrollState::idle:
@@ -1760,27 +1860,23 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 			{
 				RadioPlay();
 			}
+			else if ( key_changes & keydown & BTN_SLEEP )
+			{
+				RadioSleep();
+			}
 			break;
 
 		case ClockRadioState::Idle:
+			if ( key_changes & keydown & BTN_SNOOZE && bAlarmOn )
+			{
+				AlarmOff();
+				nNextAlarmDue = clock_secs + nSleepTime;
+			}
 			//if ( key_changes ^ keydown )
 			{
 				if ( key_changes & keydown & BTN_RADIO_OFF )
 				{
 					RadioOff();
-				}
-				else if ( key_changes & keydown & BTN_SNOOZE )
-				{
-					//                      123456789012345678901234567890123456789012345678
-					strcpy( sProgramNames, "This is a message that is less then 48 chars" );
-					ScrollText(true);
-				}
-				else if ( key_changes & keydown & BTN_SLEEP )
-				{
-					//                      123456789012345678901234567890123456789012345678
-					//strcpy( sProgramNames, "This is a message that is well over the 48 characters that can be displayed on the display in one go." );
-					strcpy( sProgramNames, "This is a message." );
-					ScrollText(true);
 				}
 				else if ( key_changes & keydown & BTN_TIME_SET )
 				{
@@ -1838,34 +1934,188 @@ void Spinner()
 
 static uint8_t ConvertVolume( int16_t v )
 {
-	int16_t sample[] = 
+	static struct Samples
 	{
-		//0,
-		190,
-		210,
-		225,
-		240,
-		260,
-		300,
-		340,
-		390,
-		415,
-		490,
-		650,
-		900,
-		1260,
-		1900,
-		2700,
-		2900,
-		4096
+		int16_t sample;
+		int16_t diff;
+	} sample[] = 
+	{
+		{190,5},
+		{210,4},
+		{225,4},
+		{240,5},
+		{260,10},
+		{300,10},
+		{340,10},
+		{380,9},
+		{415,19},
+		{490,40},
+		{650,63},
+		{900,90},
+		{1260,110},
+		{1700,150},
+		{2300,150},
+		{2900,299},
+		{4096,0},
 	};
 
-
+	// Use hysteresis to stop adc drifting.
+	if ( nLastVolume == 0 && v < sample[0].sample + sample[0].diff )
+		return nLastVolume;
+	else if ( nLastVolume == countof(sample) && v > sample[countof(sample)-1].sample - sample[countof(sample)-1].diff )
+		return nLastVolume;
+	else if ( v > sample[nLastVolume].sample - sample[nLastVolume].diff &&  v < sample[nLastVolume].sample + sample[nLastVolume].diff )
+		return nLastVolume;
+		
 	uint8_t d = 0;
-	while ( sample[d] < v )
+	while ( sample[d].sample < v )
 		d++;
 
 	return d;
+}
+
+static time_t MakeTime( uint8_t day, uint8_t month, uint8_t year, uint8_t hour, uint8_t min )
+{
+	struct tm t;
+	memset( &t,0,sizeof(t));
+	t.tm_mday = day;
+	t.tm_mon = month;
+	t.tm_year = year;
+	t.tm_hour = hour;
+	t.tm_min = min;
+	t.tm_sec = 0;
+
+	return mk_gmtime(&t);
+}
+
+
+static uint16_t MakeTime( uint8_t hour, uint8_t min )
+{
+	return hour * 24 + min;
+}
+
+static void WriteEEPROM()
+{
+}
+
+static time_t NextTimeDue(const Alarm &alarm)
+{
+	time_t time = 0xFFFFFFFF;
+
+	if ( bClockInitialised )
+	{
+		switch ( alarm.type )
+		{
+			case AlarmType::OneOff:
+				if ( alarm.nTime < clock_secs )	// Gone
+					time = 0;
+				else
+					time = alarm.nTime;
+				break;
+			case AlarmType::Scheduled:
+				{
+					struct tm tm_time;
+					gmtime_r((time_t*)&clock_secs, &tm_time);
+
+					// Check which day of the week we are up to.
+					div_t t = div( alarm.nTimeOfDay, 24 );
+					tm_time.tm_hour = t.quot;
+					tm_time.tm_min = t.rem;
+					tm_time.tm_sec = 0;
+					uint8_t dow = tm_time.tm_wday;
+					for ( uint8_t i = 0; i < 8; i++ )	// 7 + 1 days if today's alarm is already gone.
+					{
+						if ( alarm.dow & _BV(dow) )
+						{
+							// alarm set for this day.  Get seconds and see if we have passed it yet.
+							time = mk_gmtime( &tm_time );
+							if ( time > clock_secs )
+								break;
+						}
+						dow++;
+						if ( dow >= 6 )
+							dow = 0;
+						tm_time.tm_mday++;
+					}
+
+				}
+				break;
+		}
+	}
+	return time;
+}
+
+static void PrimeAlarms()
+{
+//bClockInitialised = true;
+
+	nNextAlarmDue = 0;
+	bool bChange = false;
+	for ( uint8_t i = 0; i < countof(alarms); i++ )
+	{
+		if ( alarms[i].bEnabled )
+		{
+			time_t timeDue = NextTimeDue( alarms[i] );
+			if ( timeDue == 0 )
+			{
+				alarms->bEnabled = false;
+				bChange = true;
+			}
+			else
+			{
+				if ( nNextAlarmDue == 0 || timeDue < nNextAlarmDue )
+					nNextAlarmDue = timeDue;
+			}
+		}
+	}
+	if ( bChange )
+		WriteEEPROM();
+}
+
+
+static void ReadEEPROM()
+{
+	memset( alarms, 0, sizeof(alarms) );
+	alarms[0].bEnabled = true;
+	alarms[0].type = AlarmType::OneOff;
+	//alarms[0].nTime = 2*60 ; 
+	alarms[0].nTime = MakeTime( 1, 0, 2000-1900, 0, 1 );
+
+	alarms[1].bEnabled = true;
+	alarms[1].type = AlarmType::Scheduled;
+	alarms[1].dow = 0x7F;
+	alarms[1].nTimeOfDay = MakeTime( 5 , 20 );
+
+	time_t seconds1 = 1, seconds2;
+	struct tm t1, t2;
+	memset(&t1,0,sizeof(t1));
+	memset(&t2,0,sizeof(t2));
+	gmtime_r( &seconds1, &t1 );
+	seconds2 = mk_gmtime(&t1);
+	gmtime_r( &seconds2, &t2 );
+
+	nAlarmRunTime = 60;
+	nSleepTime = 60;
+	nSnoozeTime = 10;
+
+	nLastPlayedProgram = 30;
+	nLastVolume = 0;
+
+	PrimeAlarms();
+}
+
+static void AlarmOn()
+{
+	RadioPlay();
+	// Set for the next alarm.
+	PrimeAlarms();
+	nAlarmOffTime = ms + nAlarmRunTime * 60;
+}
+
+static void AlarmOff()
+{
+	RadioOff();
+	nAlarmOffTime = 0;
 }
 
 int main(void)
@@ -1883,6 +2133,9 @@ int main(void)
 	dab.Init( MAKE_XBAUD( BSCALE, BSEL )  );
 
 	sei();
+
+	ReadEEPROM();
+	bAlarmOn = false;
 
 	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
@@ -1932,6 +2185,19 @@ int main(void)
 				bFlash = false;
 			}
 
+			if ( nNextAlarmDue && !bAlarmOn )
+			{
+				if ( clock_secs > nNextAlarmDue )
+				{
+					bAlarmOn = true;
+					// Start alarm
+					AlarmOn();
+				}
+			}
+			if ( nAlarmOffTime && nAlarmOffTime < clock_secs )
+			{
+				AlarmOff();
+			}
 		}
 
 		static int16_t nLastEncoder = -1;
@@ -2007,23 +2273,13 @@ int main(void)
 /*
 
 DAB
-- Init 
-	- EnableSyncClock.
-	- Read programs
-	- Set clock time
-		- appears you can only get time when you are playing
-		- Play a channel
-		- Get time.
-		- stop playing when we've got time.  We can abort this last step if we start playing.
+
 - Radio On
 	EnableSyncClock
 	Play
 	Volume
 - Radio Off
 	PowerOff
-- Change channle
-	- When playing, and encoder moves,
-		- Show list of stations, encoder scrolls.  Stopping scrolling plays.
 
 - Clock
 	- Idle
@@ -2035,25 +2291,74 @@ DAB
 
 
 -- TODO 
+	- display signal strength and other info.
 	- eeprom 
 		- alarms
 		- last station (short name)
 
 	- fm support?
+		- beeper?
 
 	- ldr for autobrightness.
 
 	-- Menu - when off, encoder scrolls menu.  Use alarm1/2 buttons?
 		-- alarm(s)
+			- one off
+				- date, time.
 			- mon/tue/wed/thr/fri/sat/sun
 				- time
-				- repeating - one off.
+			enabled
+			alarm type: oneoff, scheduled;
+			one off: oneoff time, oneoff date.
+			scheduled: DOW bitmask, time
+		-- alarm run time.
 		-- rescan DAB
 			-- factory reset?
 		-- different display layouts
 		-- other?
 		-- sleep time, snooze time.
-	-- change station
 
 	-- if program count = 0 dab scan (or just menu?)
+
+	-- show date, when tick over to the next day. (if we are playing).
+*/
+
+
+//alarms
+	//* Alarm 1
+		//* enabled one off - day month year hh mk_gmtime
+		//* enabled scheduled - SMTWTFS HH MM
+	//* Alarm 2
+//Alarm Time
+//Snooze Time
+//Sleep Time
+//Rescan DAB
+
+/*
+enum class MenuType : uint8_t
+{
+	Button,
+	Integer8
+};
+
+struct Menu
+{
+	MenuType type;
+	const char *sDesc;
+	union
+	{
+		struct // MenuType::Integer8
+		{
+			uint8_t int8;
+		};
+	};
+} menu[] =
+{	
+	{ type: MenuType::Integer8, sDesc: "Alarm Time" }
+	{ type: MenuType::Integer8, sDesc: "Alarm Time" }
+	{ type: MenuType::Integer8, sDesc: "Snooze Time" }
+	{ type: MenuType::Integer8, sDesc: "Sleep Time" }
+	{ type: MenuType::Button,	sDesc: "Rescan DAB" },
+};
+
 */
