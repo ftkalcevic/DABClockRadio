@@ -97,6 +97,17 @@ static uint8_t nAlarmRunTime;	// in minutes
 static uint8_t nSleepTime;		// in minutes
 static uint8_t nSnoozeTime;		// in minutes
 
+
+
+
+uint16_t eeProgramChecksum EEMEM;	// CRC of eeProgram[20] to verify if EEPROM has been set.
+char eeProgram[20] EEMEM;		// Last program (abbreviated name)
+uint8_t eeAlarmRunTime EEMEM;	// in minutes
+uint8_t eeSleepTime EEMEM;		// in minutes
+uint8_t eeSnoozeTime EEMEM;		// in minutes
+Alarm eeAlarms[MAX_ALARMS] EEMEM;
+
+
 // Display mode - what is the display showing.
 enum class DisplayMode: uint8_t
 {
@@ -118,7 +129,9 @@ static Programs *programs;
 static uint16_t nPrograms;
 static uint16_t nProgramIdx;
 static char *sProgramNames;
-static uint16_t nLastPlayedProgram = 30; //4; //30;
+static uint16_t nLastPlayedProgramIndex;
+static char sLastPlayedProgram[sizeof(eeProgram)];
+
 static uint16_t nNextProgram;
 static uint8_t nLastVolume = 0;	// What the volume is.
 static uint8_t volumeSetting = 0;	// What to set it to.
@@ -130,12 +143,6 @@ static char sCurrentProgramText[256];
 static uint16_t textXShift = 0, textXShiftMax;
 static int16_t xoffs;
 
-
-uint16_t eeProgram EEMEM;
-uint8_t eeAlarmRunTime EEMEM;	// in minutes
-uint8_t eeSleepTime EEMEM;		// in minutes
-uint8_t eeSnoozeTime EEMEM;		// in minutes
-Alarm eeAlarms[MAX_ALARMS] EEMEM;
 
 
 
@@ -251,14 +258,17 @@ static void ShowTime( long nSeconds )
 
 static void ShowProgram()
 {
-	const char *sProgram = programs[nLastPlayedProgram].sLongName;
+	const char *sProgram = programs[nLastPlayedProgramIndex].sLongName;
 
 	terminal.Send("ProgramName: ");
 	terminal.Send(sProgram);
 	terminal.SendCRLF();
 
 	if (  displayMode == DisplayMode::Playing )
+	{
+		display.ClearWindow( 0, 0, OP_SCREENW - 16*(font_6x13.cols+1), 2*ROW_HEIGHT ); 
 		display.WriteText( &font_MSShell, 0, 0, sProgram );
+	}
 }
 
 const char *WeekDay[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
@@ -309,6 +319,7 @@ static void ShowDate()
 static void UpdateTime( struct tm &t )
 {
 	uint32_t seconds = mktime(&t);
+
 	if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
 	{
 		terminal.Send( "Setting time: " );
@@ -901,6 +912,7 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 		t.tm_hour = input[2];
 		t.tm_min = input[1];
 		t.tm_sec = input[0];
+		t.tm_isdst = 0;
 
 		// Quick sanity check
 		if ( t.tm_year > 115 && t.tm_year < 200 &&
@@ -995,7 +1007,17 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 		if ( nProgramIdx < nPrograms )
 			return TaskReturn::Continue;
 		else
+		{
+			for ( uint8_t i = 0; i < nPrograms; i++ )
+			{
+				if ( strcasecmp( programs[i].sShortName, sLastPlayedProgram ) == 0 )
+				{
+					nNextProgram = nLastPlayedProgramIndex = i;
+					break;
+				}
+			}
 			return TaskReturn::Done;
+		}
 	}
 	else
 		return TaskReturn::Fail;
@@ -1003,7 +1025,7 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 
 static TaskInit funcPlayProgramForTime_init()
 {
-	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
+	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgramIndex,ms);
 	return TaskInit::OK;
 }
 
@@ -1011,7 +1033,7 @@ static TaskInit funcPlayProgram_init()
 {
 	ShowProgram();
 	*sCurrentProgramText = 0;
-	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgram,ms);
+	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgramIndex,ms);
 	return TaskInit::OK;
 }
 
@@ -1172,11 +1194,11 @@ static void InitScanTasks()
 	TaskList[nTaskCount++] = { funcGetPrograms_init, funcGetPrograms_check };
 }
 
+/*
 static TaskReturn funcGetProgramTextNotify_check(AsyncReturnCode ret)
 {
 	if ( ret == AsyncReturnCode::ReplAck )
 	{
-		// TODO : move unicode conversion into receiver.
 		char *text = sProgramNames;
 		*(text+dab.MsgLen()) = '\0';
 		terminal.Send("ProgramText: ");
@@ -1188,7 +1210,7 @@ static TaskReturn funcGetProgramTextNotify_check(AsyncReturnCode ret)
 	}
 	return TaskReturn::Fail;
 }
-
+*/
 
 static void InitGetProgramTextTasks()
 {
@@ -1201,10 +1223,11 @@ static void InitGetProgramTextTasks()
 
 static TaskInit funcChangeProgram_init() 
 { 
-	if ( nNextProgram != nLastPlayedProgram )
+	if ( nNextProgram != nLastPlayedProgramIndex )
 	{
-		nLastPlayedProgram = nNextProgram;
-		// TODO store program in eeprom.
+		nLastPlayedProgramIndex = nNextProgram;
+		strcpy( sLastPlayedProgram, programs[nLastPlayedProgramIndex].sShortName );
+		WriteEEPROM();
 		return funcPlayProgram_init();
 	}
 	return TaskInit::Skip;
@@ -1353,8 +1376,9 @@ void InitPollTasks(uint8_t nLevel)
 		TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
 
 #ifndef SET_CLOCK_AT_POWERUP
-		if ( !bClockInitialised )
+		//if ( !bClockInitialised )
 		{
+			TaskList[nTaskCount++] = { funcGetClockStatus_init, funcGetClockStatusOptional_check };
 			TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
 		}
 #endif
@@ -1570,6 +1594,8 @@ static void ChangeDisplayMode( DisplayMode mode )
 		case DisplayMode::Playing:
 			DrawPlayingMode();
 			break;
+		default:
+			break;
 	}
 }
 
@@ -1684,7 +1710,7 @@ void InitTunerDisplay()
 {
 	display.clearScreen(false);
 
-	nTunerPosition = nLastPlayedProgram * ROW_HEIGHT;	// We use pixel scrolling postions
+	nTunerPosition = nLastPlayedProgramIndex * ROW_HEIGHT;	// We use pixel scrolling postions
 	nTunerTarget = nTunerPosition;
 
 	DrawTuner();
@@ -1773,6 +1799,8 @@ static void Tuner( int8_t nEncoder )
 			break;
 		case DisplayMode::Tuner:
 			UpdateTunerDisplay(nEncoder);
+			break;
+		case DisplayMode::Scanning:
 			break;
 		}
 }
@@ -2026,6 +2054,7 @@ void DrawAlarm( Alarm &alarm,uint16_t x,uint8_t y)
 	switch ( alarm.type )
 	{
 		case AlarmType::Off:
+		default:
 			*p++ = 'O';
 			*p++ = 'f';
 			*p++ = 'f';
@@ -2036,7 +2065,7 @@ void DrawAlarm( Alarm &alarm,uint16_t x,uint8_t y)
 		{
 			struct tm t;
 
-			t.tm_hour = alarm.nHour-1;
+			t.tm_hour = alarm.nHour%12;
 			if ( alarm.nAmPm )
 				t.tm_hour += 12;
 			t.tm_min = alarm.nMin;
@@ -2305,7 +2334,7 @@ static void EditAlarmInt4(bool bFirst,uint16_t x, uint8_t y, uint16_t *n, Alarm 
 			if ( *n > min )
 			{
 				bRedraw = true;
-				*n--;
+				(*n)--;
 			}
 			nEncoder++;
 		}
@@ -2314,7 +2343,7 @@ static void EditAlarmInt4(bool bFirst,uint16_t x, uint8_t y, uint16_t *n, Alarm 
 			if ( *n < max )
 			{
 				bRedraw = true;
-				*n++;
+				(*n)++;
 			}
 			nEncoder--;
 		}
@@ -2410,6 +2439,7 @@ EditAlarmField NextField(Alarm &alarm, EditAlarmField field)
 			case EditAlarmField::OOYear:	return EditAlarmField::OOHour;
 			case EditAlarmField::OOHour:	return EditAlarmField::OOMin;
 			case EditAlarmField::OOMin:		return EditAlarmField::OOAmPm;
+			default:
 			case EditAlarmField::OOAmPm:		return EditAlarmField::Complete;
 		}
 	}
@@ -2427,9 +2457,11 @@ EditAlarmField NextField(Alarm &alarm, EditAlarmField field)
 			case EditAlarmField::SchWed:	return EditAlarmField::SchThu;	
 			case EditAlarmField::SchThu:	return EditAlarmField::SchFri;	
 			case EditAlarmField::SchFri:	return EditAlarmField::SchSat;	
+			default:
 			case EditAlarmField::SchSat:	return EditAlarmField::Complete;
 		}
 	}
+	return EditAlarmField::Complete;
 }
 
 static void EditAlarm(uint8_t iAlarm,uint16_t _x,uint8_t _y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
@@ -2534,6 +2566,7 @@ static void EditAlarm(uint8_t iAlarm,uint16_t _x,uint8_t _y, bool bFirst, uint16
 			bEditing = false;
 			alarms[iAlarm] = alarm;
 			WriteEEPROM();
+			PrimeAlarms();
 			DrawMenu();
 			break;
 	}
@@ -2669,21 +2702,31 @@ static void DoClockRadio(uint16_t key_changes, int8_t nEncoder )
 			if ( key_changes & keydown & BTN_SNOOZE && bAlarmOn )
 			{
 				AlarmOff();
-				nNextAlarmDue = clock_secs + nSleepTime;
+				nNextAlarmDue = clock_secs + nSnoozeTime*60;
 			}
-			//if ( key_changes ^ keydown )
+			if ( key_changes & keydown & BTN_RADIO_OFF )
 			{
-				if ( key_changes & keydown & BTN_RADIO_OFF )
-				{
-					RadioOff();
-				}
-				else if ( key_changes & keydown & BTN_TIME_SET )
-				{
-					//                      123456789012345678901234567890123456789012345678
-					strcpy( sProgramNames, "Another long message; The quick brown fox jumps over the lazy dog." );
-					ScrollText(true);
-				}
+				RadioOff();
 			}
+			else if ( key_changes & keydown & BTN_TIME_SET )
+			{
+				ScrollText(true);
+			}
+			else if ( key_changes & keydown & (BTN_FWD_FAST | BTN_FWD_SLOW) )
+			{
+				if ( nNextProgram < nPrograms-1 )
+					nNextProgram++;
+				else
+					nNextProgram = 0;
+			}
+			else if ( key_changes & keydown & (BTN_REV_FAST | BTN_REV_SLOW) )
+			{
+				if ( nNextProgram > 0 )
+					nNextProgram--;
+				else
+					nNextProgram = nPrograms-1;
+			}
+
 			if ( nEncoder )
 			{
 				Tuner( nEncoder );
@@ -2771,6 +2814,8 @@ static uint8_t ConvertVolume( int16_t v )
 	return d;
 }
 
+#ifdef NOEEPROM
+
 static time_t MakeTime( uint8_t day, uint8_t month, uint8_t year, uint8_t hour, uint8_t min )
 {
 	struct tm t;
@@ -2790,10 +2835,7 @@ static uint16_t MakeTime( uint8_t hour, uint8_t min )
 {
 	return hour * 24 + min;
 }
-
-static void WriteEEPROM()
-{
-}
+#endif
 
 static time_t NextTimeDue(const Alarm &alarm)
 {
@@ -2803,19 +2845,24 @@ static time_t NextTimeDue(const Alarm &alarm)
 	{
 		switch ( alarm.type )
 		{
+			case AlarmType::Max:
+			case AlarmType::Off:
+				break;
+
 			case AlarmType::OneOff:
 			{
 				time_t t;
 				struct tm nextTime;
 
-				nextTime.tm_hour = alarm.nHour-1;
+				nextTime.tm_hour = alarm.nHour % 12;
 				if ( alarm.nAmPm )
-					nextTime.tm_hour + 12;
+					nextTime.tm_hour += 12;
 				nextTime.tm_min = alarm.nMin;
 				nextTime.tm_sec = 0;
 				nextTime.tm_mday = alarm.nDay;
 				nextTime.tm_mon = alarm.nMonth;
 				nextTime.tm_year = alarm.nYear - 1900;
+				nextTime.tm_isdst = 0;
 				t = mktime(&nextTime);
 
 				if ( t < clock_secs )	// Gone
@@ -2830,7 +2877,7 @@ static time_t NextTimeDue(const Alarm &alarm)
 					gmtime_r((time_t*)&clock_secs, &tm_time);
 
 					// Check which day of the week we are up to.
-					tm_time.tm_hour = alarm.nHour-1;
+					tm_time.tm_hour = alarm.nHour%12;
 					if ( alarm.nAmPm )
 						tm_time.tm_hour += 12;
 					tm_time.tm_min = alarm.nMin;
@@ -2884,9 +2931,37 @@ static void PrimeAlarms()
 		WriteEEPROM();
 }
 
+static uint16_t CalcCRC16( const uint8_t *buf, uint8_t len )
+{
+	CRC.CTRL = CRC_RESET_RESET0_gc;
+	CRC.CTRL = CRC_SOURCE_IO_gc;
+	while ( len )
+	{
+		CRC.DATAIN = *buf;
+		buf++;
+		len--;
+	}
+	CRC.STATUS |= CRC_BUSY_bm;
+	return CRC.CHECKSUM0 | (CRC.CHECKSUM1 << 8);
+}
+
+static void WriteEEPROM()
+{
+	eeprom_write_block( sLastPlayedProgram, &eeProgram, sizeof(sLastPlayedProgram) );
+	eeprom_write_byte( &eeAlarmRunTime, nAlarmRunTime );
+	eeprom_write_byte( &eeSleepTime, nSleepTime );
+	eeprom_write_byte( &eeSnoozeTime, nSnoozeTime );
+	eeprom_write_block( alarms, &eeAlarms, sizeof(alarms) );
+
+	uint16_t crc16 = CalcCRC16( (uint8_t *)sLastPlayedProgram, sizeof(sLastPlayedProgram) );
+	eeprom_write_word( &eeProgramChecksum, crc16 );
+}
+
+
 
 static void ReadEEPROM()
 {
+#ifdef NOEEPROM
 	memset( alarms, 0, sizeof(alarms) );
 
 	alarms[0].type = AlarmType::OneOff;
@@ -2915,10 +2990,39 @@ static void ReadEEPROM()
 	nSleepTime = 60;
 	nSnoozeTime = 10;
 
-	nLastPlayedProgram = 30;
-	nLastVolume = 0;
+	PrimeAlarms();
+#else
+	eeprom_read_block( sLastPlayedProgram, &eeProgram, sizeof(sLastPlayedProgram) );
+	uint16_t crc16 = eeprom_read_word( &eeProgramChecksum );
+	nAlarmRunTime = eeprom_read_byte( &eeAlarmRunTime );
+	nSleepTime = eeprom_read_byte( &eeSleepTime );
+	nSnoozeTime = eeprom_read_byte( &eeSnoozeTime );
+	eeprom_read_block( alarms, &eeAlarms, sizeof(alarms) );
+
+	uint16_t computed_crc16 = CalcCRC16( (uint8_t *) sLastPlayedProgram, sizeof(sLastPlayedProgram) );
+	if ( crc16 != computed_crc16 )
+	{
+		// CRC failed.  Init sane defaults.
+		sLastPlayedProgram[0] = 0;
+		nAlarmRunTime = 60;
+		nSleepTime = 60;
+		nSnoozeTime = 10;
+		alarms[0].type = AlarmType::Off;
+		alarms[0].dow = 0x7F;
+		alarms[0].nAmPm = 0;
+		alarms[0].nDay = 1;
+		alarms[0].nMonth = 0;
+		alarms[0].nYear = 2016;
+		alarms[0].nHour = 7;
+		alarms[0].nMin = 30;
+		for ( uint8_t i = 1; i < MAX_ALARMS; i++ )
+			alarms[i] = alarms[0];
+
+		WriteEEPROM();
+	}
 
 	PrimeAlarms();
+#endif
 }
 
 static void AlarmOn()
@@ -2926,7 +3030,7 @@ static void AlarmOn()
 	RadioPlay();
 	// Set for the next alarm.
 	PrimeAlarms();
-	nAlarmOffTime = ms + nAlarmRunTime * 60;
+	nAlarmOffTime = clock_secs + nAlarmRunTime * 60;
 }
 
 static void AlarmOff()
@@ -3013,8 +3117,9 @@ int main(void)
 	display.setBrightness(8);
 
 	programs = (Programs *)__malloc_heap_start;
+	nLastVolume = 0;
 
-	nNextProgram = nLastPlayedProgram;
+	nNextProgram = nLastPlayedProgramIndex = 0;
 
 	uint16_t last_tick = 0;
 	bool bFlash = true;
@@ -3156,9 +3261,6 @@ DAB
 
 -- TODO 
 	- display signal strength and other info.
-	- eeprom 
-		- alarms
-		- last station (short name)
 
 	- fm support?
 		- beeper?
@@ -3186,7 +3288,7 @@ DAB
 
 	-- show date, when tick over to the next day. (if we are playing).
 
-	-- Remember the last program short name not number.
+
 */
 
 
