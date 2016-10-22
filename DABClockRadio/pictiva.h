@@ -115,7 +115,7 @@ public:
 		PR.PRPC &= ~PR_SPI_bm;	// enable SPIC
 
 		PICTIVA_SPI.INTCTRL = 0;
-		PICTIVA_SPI.CTRL = SPI_ENABLE_bm | SPI_MASTER_bm | SPI_MODE_0_gc | SPI_CLK2X_bm;
+		PICTIVA_SPI.CTRL = SPI_ENABLE_bm | SPI_MASTER_bm | SPI_MODE_0_gc | SPI_CLK2X_bm;		// clk2x=1 prescaler=0   clkper/2
 	}
 
 
@@ -182,6 +182,8 @@ public:
 		send( _CMD_SETROW, true );
 		send( 0, true );
 		send( 47, true );
+
+		EnableLinearGreyScale();
 
 		//for ( int i = 0; i < 10000; i++)
 		//{
@@ -313,6 +315,12 @@ public:
 		send( (bRectFill ? 0x1 : 0 ) | (bInvertCopy ? 0x10 : 0), true );
 		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
 	}
+	void EnableLinearGreyScale()
+	{
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		send( _CMD_LINGRYTABLE, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+	}
 
 
 	void PutPixel( uint8_t c, uint8_t nPos )
@@ -334,7 +342,7 @@ public:
 	}
 
 	// Write a line of text.  No clipping or boundary checking.  Monospace.
-	void WriteText( const FontStruct * font, int16_t x, int8_t y, const char *s, uint8_t colour = 0x3F )
+	void WriteText( const FontStruct * font, int16_t x, int8_t y, const char *s, uint8_t colour = 0x3F, uint8_t background = 0 )
 	{
 		// On the screen?
 		if ( y + font->rows < 0 || y > OP_SCREENH )
@@ -379,7 +387,7 @@ public:
 				// Leading pixels
 				for ( ; p < start.rem; p++, px++ )
 					if ( px >= 0 )
-						PutPixel( 0, p );
+						PutPixel( background, p );
 
 				// text
 				while ( *ptr && px < OP_SCREENW )
@@ -388,7 +396,7 @@ public:
 					for ( uint8_t c = 0; c < font->cols && px < OP_SCREENW; c++ )
 					{
 						if ( px >= 0 )
-							PutPixel( (bits & _BV(7-c)) ? colour : 0, p );
+							PutPixel( (bits & _BV(7-c)) ? colour : background, p );
 						p++;
 						px++;
 						if (p==3) p = 0;
@@ -396,7 +404,7 @@ public:
 					if ( px < OP_SCREENW )
 					{
 						if ( px >= 0 )
-							PutPixel( 0, p );
+							PutPixel( background, p );
 						px++;
 						p++;
 						if (p==3) p = 0;
@@ -408,7 +416,7 @@ public:
 				for ( int8_t i = end.rem; i >= 0 && px < OP_SCREENW; i-- )
 				{
 					if ( px >= 0 )
-						PutPixel( 0, p );
+						PutPixel( background, p );
 					px++;
 					p++;
 				}
@@ -579,6 +587,35 @@ public:
 		}
 	}
 
+	void SolidRectangle( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye,  uint8_t colour, bool bWait = false )
+	{
+		SetFillMode(true,false);
+
+		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
+		send( _CMD_DRAW_RECT, true );
+		send( xs / 3, true );
+		send( ys, true );
+		send( xe / 3, true );
+		send( ye, true );
+		for ( uint8_t i = 0; i < 6; i++ )	// RGB front/rear.
+			send( colour, true );
+		PICTIVA_SS_PORT.OUTSET = PICTIVA_SS;
+
+		if ( bWait )
+		{
+			// As there is not feedback from the SSD0332, we need to wait for the copy to finish.  The more pixels the long the wait.
+			uint16_t w;
+			w = (xe - xs)>>1;	// Actually 3/2 (3 pixels per 2 bytes) but this just an estimate.
+			w *= (ye - ys);
+			w /= 64;
+			while ( w > 0 )
+			{
+				_delay_us(5);	// argument must be a constant so the delay routine is calculated at compile time.  Otherwise it does floating point math.
+				w--;
+			}
+		}
+	}
+
 	void Copy( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye,  uint16_t xd, uint8_t yd, bool bWait = false )
 	{
 		PICTIVA_SS_PORT.OUTCLR = PICTIVA_SS;
@@ -628,6 +665,13 @@ public:
 				w--;
 			}
 		}
+	}
+
+	void InvertWindow( uint16_t xs, uint8_t ys, uint16_t xe,uint8_t ye, bool bWait = false )
+	{
+		SetFillMode(false,true);
+		Copy( xs,ys, xe,ye, xs,ys, bWait );
+		SetFillMode(false,false);
 	}
 
 	void HLine( int16_t x1, int16_t x2, int8_t y, uint8_t c)

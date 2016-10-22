@@ -413,6 +413,35 @@ public:
 		}
 	}
 
+	
+	void STREAM_SetStereoMode_Async(bool bStereo, const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t out[1];
+		out[0] = bStereo ? 1 : 0;
+
+		uint8_t sn = SendCommand( DABStreamCmd::SetStereoMode, out, sizeof(out) );
+		WaitForReply_Async( DABStreamCmd::SetStereoMode, sn, clock+timeout );
+	}
+
+	void STREAM_GetFrequency_Async(uint32_t program, const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t out[4];
+		out[0] = (program >>24) & 0xFF;
+		out[1] = (program >>16) & 0xFF;
+		out[2] = (program >>8) & 0xFF;
+		out[3] = (program) & 0xFF;
+		uint8_t sn = SendCommand( DABStreamCmd::GetFrequency, out, sizeof(out) );
+		WaitForReply_Async( DABStreamCmd::GetFrequency, sn, clock+timeout, 1 );
+	}
+
+	
+	void STREAM_GetStereo_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t sn = SendCommand( DABStreamCmd::GetStereo );
+		WaitForReply_Async( DABStreamCmd::GetStereo, sn, clock+timeout, 1 );
+	}
+
+
 	void STREAM_GetPlayStatus_Async(const uint32_t clock, uint16_t timeout = 250 )
 	{
 		uint8_t sn = SendCommand( DABStreamCmd::GetPlayStatus );
@@ -627,6 +656,24 @@ public:
 		{
 			return ErrorCleanup();
 		}
+	}
+
+
+	void STREAM_ClearDatabase_Async(const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t out[1];
+		out[0] = 2;	// clear database only
+		uint8_t sn = SendCommand( DABSystemCmd::Reset, out, sizeof(out) );
+		WaitForReply_Async(DABSystemCmd::Reset,sn, clock+timeout);
+	}
+
+	void STREAM_AutoSearch_Async(uint8_t startFreq, uint8_t endFreq, const uint32_t clock, uint16_t timeout = 250 )
+	{
+		uint8_t out[2];
+		out[0] = startFreq;
+		out[1] = endFreq;
+		uint8_t sn = SendCommand( DABStreamCmd::AutoSearch, out, sizeof(out) );
+		WaitForReply_Async(DABStreamCmd::AutoSearch,sn, clock+timeout);
 	}
 
 

@@ -63,34 +63,32 @@ static uint32_t radioTimer;
 static void ScrollText(bool bRedraw=false);
 static void PrimeAlarms();
 static void AlarmOff();
-
+static void RadioOff(bool bForce = false);
+static void DrawMenu();
+static void WriteEEPROM();
 
 enum class AlarmType: uint8_t
-{
+{	
+	Off=0,
 	OneOff,
-	Scheduled
+	Scheduled,
+	Max
 };
 
 struct Alarm
 {
-	bool bEnabled;
 	AlarmType type;
 	// program ? -1: beeper
-	union
-	{
-		struct 
-		{
-			time_t nTime;				// seconds since 1970
-		};
-		struct  
-		{
-			uint8_t dow;			// Days of week bitmask: bit 0 is sunday.
-			uint16_t nTimeOfDay;	// minutes since midnight.
-		};
-	};
+	uint8_t nHour;	/**< 1-12 */
+	uint8_t nMin;	/**< 0-59 */
+	uint8_t nAmPm;	/**< 0-1 */
+	uint8_t nDay;	/**< 1-31 */
+	uint8_t nMonth;	/**< 0-11 */
+	uint16_t nYear;	/**< YYYY */
+	uint8_t dow;			// Days of week bitmask: bit 0 is sunday.
 };
 
-#define MAX_ALARMS	10
+#define MAX_ALARMS	4
 static Alarm alarms[MAX_ALARMS];
 static time_t nNextAlarmDue;
 static time_t nAlarmOffTime = 0;
@@ -105,7 +103,8 @@ enum class DisplayMode: uint8_t
 	Off,
 	Playing,
 	Tuner,
-	Menu
+	Menu,
+	Scanning
 } displayMode = DisplayMode::Off;
 
 
@@ -139,6 +138,21 @@ uint8_t eeSnoozeTime EEMEM;		// in minutes
 Alarm eeAlarms[MAX_ALARMS] EEMEM;
 
 
+
+static enum class ClockRadioState: uint8_t
+{
+	Off,
+	Idle,
+	Menu
+} clockRadioState = ClockRadioState::Off;
+
+
+static uint16_t nTunerPosition, nTunerTarget;
+const int16_t TUNER_WIDTH = 120;	// Multiple of 3
+const int16_t TUNER_WIDTH_WORDS = TUNER_WIDTH/3;	// Multiple of 3
+const int16_t SELECTOR_WIDTH = TUNER_WIDTH/2;
+const int16_t ROW_HEIGHT = 12;
+static uint16_t *paintBuffer;
 
 static void InitI2C()
 {
@@ -247,6 +261,9 @@ static void ShowProgram()
 		display.WriteText( &font_MSShell, 0, 0, sProgram );
 }
 
+const char *WeekDay[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+const char *Month[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+
 static void ShowDate()
 {
 	if ( displayMode == DisplayMode::Playing )
@@ -263,10 +280,9 @@ static void ShowDate()
 		if ( t.tm_mday < 10 )
 			n++;
 
-		const char *WeekDay = "SunMonTueWedThuFriSat";
-		s[n++] = WeekDay[t.tm_wday*3+0];
-		s[n++] = WeekDay[t.tm_wday*3+1];
-		s[n++] = WeekDay[t.tm_wday*3+2];
+		s[n++] = WeekDay[t.tm_wday][0];
+		s[n++] = WeekDay[t.tm_wday][1];
+		s[n++] = WeekDay[t.tm_wday][2];
 		n++;
 
 		if ( t.tm_mday >= 10 )
@@ -274,10 +290,9 @@ static void ShowDate()
 		s[n++] =  '0' + (t.tm_mday % 10 );
 		n++;
 
-		const char *Month = "JanFebMarAprMayJunJulAugSepOctNovDec";
-		s[n++] = Month[t.tm_mon*3+0];
-		s[n++] = Month[t.tm_mon*3+1];
-		s[n++] = Month[t.tm_mon*3+2];
+		s[n++] = Month[t.tm_mon][0];
+		s[n++] = Month[t.tm_mon][1];
+		s[n++] = Month[t.tm_mon][2];
 		n++;
 
 		uint16_t y = t.tm_year + 1900;
@@ -293,7 +308,7 @@ static void ShowDate()
 
 static void UpdateTime( struct tm &t )
 {
-	uint32_t seconds = mk_gmtime(&t);
+	uint32_t seconds = mktime(&t);
 	if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
 	{
 		terminal.Send( "Setting time: " );
@@ -736,7 +751,10 @@ static enum class RadioState: uint8_t
 	StartPlaying,
 	InitStartTasks,
 	Playing,
-	PlayingNext
+	PlayingNext,
+	StartScanning,
+	InitScanTasks,
+	ScanDone
 } radioState = RadioState::Init, successState, failState, taskDoneState;
 static int8_t task;
 
@@ -1078,6 +1096,82 @@ static void InitStartTasks()
 	TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
 }
 
+
+
+static TaskInit funcClearDatabase_init() 
+{
+	dab.STREAM_ClearDatabase_Async(40,ms);
+	display.WriteText(&font_6x13,0,ROW_HEIGHT*0,"Scanning");
+	return TaskInit::OK;
+}
+
+static uint8_t nScanCount;
+static TaskInit funcDABAutoScan_init() 
+{
+	nScanCount = 0;
+	dab.STREAM_AutoSearch_Async(0,40,ms);
+	return TaskInit::OK;
+}
+
+static TaskInit funcWaitForAutoScan_init() 
+{
+	if ( (nScanCount & 1) == 0 )
+	{
+		dab.STREAM_GetPlayStatus_Async(ms);
+	}
+	else if ( (nScanCount & 2) == 0 )
+	{
+		dab.STREAM_GetFrequency_Async(0,ms);
+	}
+	else
+	{
+		dab.STREAM_GetTotalProgram_Async(ms);
+	}
+	return TaskInit::OK;
+}
+
+static TaskReturn funcWaitForAutoScan_check(AsyncReturnCode ret)
+{
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		if ( (nScanCount & 1) == 0 )
+		{
+			if ( dab.MsgBuffer()[0] != (int8_t)DABPlayStatus::Searching )
+				return TaskReturn::Done;
+		}
+		else if ( (nScanCount & 2) == 0 )
+		{
+			uint8_t nFreqIndex = dab.MsgBuffer()[0];
+			char s[20];
+			strcpy( s, "Freq: " );
+			itoa( nFreqIndex, s+strlen(s), 10 );
+			display.WriteText(&font_6x13,0,ROW_HEIGHT*1,s);
+		}
+		else
+		{
+			uint16_t nPrograms =  dab.MsgBuffer()[3] | ( dab.MsgBuffer()[2]<<8);	// use only the 2 low bytes.
+			char s[20];
+			strcpy( s, "Programs: " );
+			itoa( nPrograms, s+strlen(s), 10 );
+			display.WriteText(&font_6x13,0,ROW_HEIGHT*2,s);
+		}
+		nScanCount++;
+	}
+	return TaskReturn::Fail;
+}
+
+static void InitScanTasks()
+{
+	task = 0;
+	nTaskCount = 0;
+
+	TaskList[nTaskCount++] = { funcClearDatabase_init, ack_check };
+	TaskList[nTaskCount++] = { funcDABAutoScan_init, ack_check };
+	TaskList[nTaskCount++] = { funcWaitForAutoScan_init, funcWaitForAutoScan_check };
+	TaskList[nTaskCount++] = { funcGetProgramCount_init, funcGetProgramCount_check };
+	TaskList[nTaskCount++] = { funcGetPrograms_init, funcGetPrograms_check };
+}
+
 static TaskReturn funcGetProgramTextNotify_check(AsyncReturnCode ret)
 {
 	if ( ret == AsyncReturnCode::ReplAck )
@@ -1189,6 +1283,28 @@ static TaskReturn funcGetSignalStrength_check(AsyncReturnCode ret)
 	return TaskReturn::Fail;
 }
 
+static TaskInit funcGetStereo_init() 
+{ 
+	dab.STREAM_GetStereo_Async(ms); 
+	return TaskInit::OK; 
+}
+static TaskReturn funcGetStereo_check(AsyncReturnCode ret) 
+{ 
+	if ( ret == AsyncReturnCode::ReplAck )
+	{
+		uint8_t stereoMode = dab.MsgBuffer()[0];
+		terminal.Send("StereoMode: ");
+		terminal.Send(stereoMode);
+		terminal.SendCRLF();
+		return TaskReturn::Done;
+	}
+	else if ( ret == AsyncReturnCode::ReplyNack )
+	{
+		return TaskReturn::Done;
+	}
+	return TaskReturn::Fail;
+}
+
 static TaskInit funcUpdateVolume_init()
 {
 	if ( volumeSetting != nLastVolume )
@@ -1233,11 +1349,16 @@ void InitPollTasks(uint8_t nLevel)
 		TaskList[nTaskCount++] = { funcGetPlayMode_init, funcGetPlayMode_check };
 		TaskList[nTaskCount++] = { funcGetPlayIndex_init, funcGetPlayIndex_check };
 		TaskList[nTaskCount++] = { funcGetSignalStrength_init, funcGetSignalStrength_check };
+		TaskList[nTaskCount++] = { funcGetStereo_init, funcGetStereo_check };
 		TaskList[nTaskCount++] = { funcGetProgramText_init, funcGetProgramText_check };
-		//if ( !bClockInitialised )
-		//{
-			//TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
-		//}
+
+#ifndef SET_CLOCK_AT_POWERUP
+		if ( !bClockInitialised )
+		{
+			TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_Optional_check };
+		}
+#endif
+
 	}
 	if ( nLevel >= 3 )
 	{
@@ -1355,6 +1476,21 @@ void DoDAB()
 				SetWaitForReply( RadioState::InitStartTasks, RadioState::StartPlaying );
 				break;
 								
+			case RadioState::StartScanning:
+				dab.SYSTEM_GetSysRdy_Async(ms,500);
+				SetWaitForReply( RadioState::InitScanTasks, RadioState::StartScanning );
+				break;
+								
+			case RadioState::InitScanTasks:
+				InitScanTasks();
+				radioState = RadioState::StartUpTasks;
+				taskDoneState = RadioState::ScanDone;
+				break;
+
+			case RadioState::ScanDone:
+				RadioOff();
+				break;
+
 			case RadioState::InitStartTasks:
 				InitStartTasks();
 				dab.Mute( false );
@@ -1437,21 +1573,6 @@ static void ChangeDisplayMode( DisplayMode mode )
 	}
 }
 
-
-static enum class ClockRadioState: uint8_t
-{
-	Off,
-	Idle,
-} clockRadioState = ClockRadioState::Off;
-
-
-static uint16_t nTunerPosition, nTunerTarget;
-const int16_t TUNER_WIDTH = 120;	// Multiple of 3
-const int16_t TUNER_WIDTH_WORDS = TUNER_WIDTH/3;	// Multiple of 3
-const int16_t SELECTOR_WIDTH = TUNER_WIDTH/2;
-const int16_t ROW_HEIGHT = 12;
-static uint16_t *paintBuffer;
-static int8_t nEncoderDelta=0;
 
 static void SetPixel( uint16_t *pixel, uint8_t c, uint8_t nPos )
 {
@@ -1565,40 +1686,33 @@ void InitTunerDisplay()
 
 	nTunerPosition = nLastPlayedProgram * ROW_HEIGHT;	// We use pixel scrolling postions
 	nTunerTarget = nTunerPosition;
-	nEncoderDelta=0;
 
 	DrawTuner();
 }
 
 
-void UpdateTunerDisplay(int8_t delta)
+void UpdateTunerDisplay(int8_t nEncoderDelta)
 {
-	static uint8_t nEncoderReset = 0;
 	static uint8_t nChannelChange = 0;
 	static uint8_t nInactiveTimer = 0;
 
 	const uint8_t CHANNEL_CHANGE_TIMER = (1000/128);	// ms/128
 	const uint8_t INACTIVE_TIMER = (7500l/128);			// ms/128
-	const uint8_t ENCODER_RESET_TIMER = 250;			// ms
 
-	nEncoderDelta += delta;
-	if ( delta )
-		nEncoderReset = ENCODER_RESET_TIMER;
-
-	while ( nEncoderDelta >= 4 )
+	while ( nEncoderDelta > 0 )
 	{
 		nTunerTarget += ROW_HEIGHT;
-		nEncoderDelta -= 4;	// 4 encoder ticks per detent.
+		nEncoderDelta--;
 		nChannelChange = CHANNEL_CHANGE_TIMER;
 		nInactiveTimer = INACTIVE_TIMER;
 	}
-	while ( nEncoderDelta <= -4 )
+	while ( nEncoderDelta < 0 )
 	{
 		if ( nTunerTarget < ROW_HEIGHT )
 			nTunerTarget = 0;
 		else
 			nTunerTarget -= ROW_HEIGHT;
-		nEncoderDelta += 4;	// 4 encoder ticks per detent.
+		nEncoderDelta++;
 		nChannelChange = CHANNEL_CHANGE_TIMER;
 		nInactiveTimer = INACTIVE_TIMER;
 	}
@@ -1606,32 +1720,11 @@ void UpdateTunerDisplay(int8_t delta)
 	if ( nTunerTarget  > ROW_HEIGHT*(nPrograms-1) )
 		nTunerTarget  = ROW_HEIGHT*(nPrograms-1);
 
-	//if ( delta != 0 )
-	//{	
-		//terminal.Send("Encoder ");
-		//terminal.Send(delta);
-		//terminal.Send(",");
-		//terminal.Send(nEncoderDelta);
-		//terminal.Send(",");
-		//terminal.Send(nTunerTarget);
-		//terminal.Send(",");
-		//terminal.Send(nTunerPosition);
-		//terminal.SendCRLF();	
-	//}
-
 	static uint8_t last_ms8 = 0;
 	uint8_t ms8 = *(uint8_t *)&ms;
 	if ( ms8 != last_ms8 )
 	{
 		last_ms8 = ms8;
-
-		// Clear the encoder count of funny results, not resting on even multiple of 4.
-		if ( nEncoderReset )
-		{
-			nEncoderReset--;
-			if ( nEncoderReset == 0 )
-				nEncoderDelta =0;
-		}	
 
 		if ( (ms8 & 0x7f) == 0 )	// every 128ms
 		{
@@ -1665,7 +1758,7 @@ void UpdateTunerDisplay(int8_t delta)
 	DrawTuner();
 }
 
-static void Tuner( int16_t shift )
+static void Tuner( int8_t nEncoder )
 {
 	switch ( displayMode )
 	{
@@ -1679,7 +1772,7 @@ static void Tuner( int16_t shift )
 			displayMode = DisplayMode::Tuner;
 			break;
 		case DisplayMode::Tuner:
-			UpdateTunerDisplay(shift);
+			UpdateTunerDisplay(nEncoder);
 			break;
 		}
 }
@@ -1705,9 +1798,9 @@ static void RadioSleep()
 }
 
 
-static void RadioOff()
+static void RadioOff(bool bForce)
 {
-	if ( radioState != RadioState::Off )
+	if ( radioState != RadioState::Off || bForce )
 	{
 		dab.PowerOff();
 		display.displayPowerOff();
@@ -1783,7 +1876,7 @@ static void ScrollText(bool bRedraw)
 	}
 	if ( ms8 != last_ms8 && displayMode == DisplayMode::Playing )
 	{
-		if ( (ms8 & 7) == 0 )
+	if ( (ms8 & 7) == 0 )
 		switch ( scrollState )
 		{
 			case ScrollState::idle:
@@ -1848,11 +1941,709 @@ static void ScrollText(bool bRedraw)
 
 }
 
+//alarms
+	//* Alarm 1
+		//* enabled one off - day month year hh mktime
+		//* enabled scheduled - SMTWTFS HH MM
+	//* Alarm 2
+//Alarm Time
+//Snooze Time
+//Sleep Time
+//Rescan DAB
+/*
+123456789012345678901234567890123456789012345678
+Alarm 1 : Off
+Alarm 2 : 12 Feb 2016 07:15 am
+Alarm 3 : Sun Mon Tue Wed Thu Fri Sat 07:15 am
+Alarm On Time: MMM min
+Snooze Time: MMM min
+Sleep Time: MMM min
+Rescan DAB:
+*/
 
-static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
+
+static uint8_t iMenuItem;
+static uint8_t bEditing;
+
+enum class MenuType : uint8_t
 {
-	static int16_t nLastEncoder = 0;
+	Button,
+	Integer8,
+	Alarm
+};
 
+struct Menu
+{
+	MenuType type;
+	const char *sDesc;
+	void (* DrawMenu)( uint8_t data, uint16_t x, uint8_t y );
+	int DrawMenuData;
+	void (* DoMenu)( uint8_t data, uint16_t x, uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder );
+}; 
+
+static void Make2Int( char *s, uint8_t n, char cFiller=' ' )
+{
+	if ( n >= 100 )
+		n = n % 100;
+
+	if ( n < 10 )
+		*(s++) = cFiller;
+	itoa( n, s, 10 );
+}
+
+static void Make3Int( char *s, uint8_t n )
+{
+	if ( n < 100 )
+	{
+		*(s++) = ' ';
+		if ( n < 10 )
+		*(s++) = ' ';
+	}
+	itoa( n, s, 10 );
+}
+
+/*
+123456789012345678901234567890123456789012345678
+Alarm 1 : Off
+Alarm 2 : Mon 12 Feb 2016 07:15 am
+Alarm 3 : Sun Mon Tue Wed Thu Fri Sat 07:15 am
+*/
+
+#define DOW_BACKGROUND_COLOUR 24
+
+void ShowAlarmDOW( uint8_t dow, uint8_t iEnabled, uint16_t x, uint8_t y )
+{
+	display.WriteText( &font_6x13, x, y, WeekDay[dow], iEnabled == 0 ? 0x3F : 0, iEnabled == 0 ? 0 : DOW_BACKGROUND_COLOUR );
+}
+
+void DrawAlarm( Alarm &alarm,uint16_t x,uint8_t y)
+{
+	char line[36];
+	char *p = line;
+	memset( line, ' ', sizeof(line) );
+	line[sizeof(line)-1] = 0;
+
+	switch ( alarm.type )
+	{
+		case AlarmType::Off:
+			*p++ = 'O';
+			*p++ = 'f';
+			*p++ = 'f';
+			display.WriteText(&font_6x13, x,y, line );
+			break;
+
+		case AlarmType::OneOff:
+		{
+			struct tm t;
+
+			t.tm_hour = alarm.nHour-1;
+			if ( alarm.nAmPm )
+				t.tm_hour += 12;
+			t.tm_min = alarm.nMin;
+			t.tm_sec = 0;
+			t.tm_mday = alarm.nDay;
+			t.tm_mon = alarm.nMonth;
+			t.tm_year = alarm.nYear - 1900;
+			mktime(&t);
+		
+			char *p = line;
+			*p++ = WeekDay[t.tm_wday][0];
+			*p++ = WeekDay[t.tm_wday][1];
+			*p++ = WeekDay[t.tm_wday][2];
+			*p++ = ' ';
+			Make2Int( p, alarm.nDay ); p+=2;
+			*p++ = ' ';
+			*p++ = Month[alarm.nMonth][0];
+			*p++ = Month[alarm.nMonth][1];
+			*p++ = Month[alarm.nMonth][2];
+			*p++ = ' ';
+			uint16_t year = alarm.nYear - 2000;
+			*p++ = '2';
+			*p++ = '0' + (year%1000)/100;
+			*p++ = '0' + (year%100)/10;
+			*p++ = '0' + (year%10);
+			*p++ = ' ';
+			Make2Int( p, alarm.nHour );
+			p+=2;
+			*p++ = ':';
+			Make2Int( p, alarm.nMin, '0' );
+			p+=2;
+			if ( alarm.nAmPm )
+				*p++ = 'p';
+			else
+				*p++ = 'a';
+			*p++ = 'm';
+			display.WriteText( &font_6x13, x,y, line );
+			break;
+		}
+
+		case AlarmType::Scheduled:
+		{
+			char *p = line;
+			Make2Int( p, alarm.nHour );
+			p+=2;
+			*p++ = ':';
+			Make2Int( p, alarm.nMin, '0' );
+			p+=2;
+			if ( alarm.nAmPm )
+				*p++ = 'p';
+			else
+				*p++ = 'a';
+			*p++ = 'm';
+			display.WriteText( &font_6x13, x,y, line );
+			
+			for ( uint8_t dow = 0; dow < 7; dow++ )
+			{
+				ShowAlarmDOW( dow, alarm.dow & _BV(dow), x + (8 + 4 * dow ) * (font_6x13.cols+1), y);
+			}
+			break;
+		}
+	}
+}
+
+void DrawAlarm(uint8_t iAlarm,uint16_t x,uint8_t y)
+{
+	DrawAlarm(alarms[iAlarm],x,y);
+}
+void DrawMinutes( uint16_t x, uint8_t y, uint8_t n )
+{
+	char s[10];		// XXX min
+	Make3Int( s, n );
+	strcat(s, " min" );
+	display.WriteText( &font_6x13, x, y, s );
+}
+
+void DrawAlarmTime(uint8_t,uint16_t x,uint8_t y)
+{
+	DrawMinutes( x,y, nAlarmRunTime );
+}
+
+void DrawSnoozeTime(uint8_t,uint16_t x,uint8_t y)
+{
+	DrawMinutes( x,y, nSnoozeTime );
+}
+
+void DrawSleepTime(uint8_t,uint16_t x,uint8_t y)
+{
+	DrawMinutes( x,y, nSleepTime );
+}
+
+static void DoRescanDAB(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	display.clearScreen();
+	dab.AsyncStart();
+	displayMode = DisplayMode::Scanning;
+	radioState = RadioState::StartScanning;
+	clockRadioState = ClockRadioState::Idle;
+}
+
+enum class EditIntReturn : uint8_t
+{
+	Continue,
+	OK,
+	Cancel
+};
+
+
+static EditIntReturn EditInt(uint8_t *n,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	static uint8_t dn;
+	static uint16_t dx;
+	static uint8_t dy;
+
+	bool bRedraw = false;
+	if ( bFirst )
+	{
+		dn = *n;
+		dx = x;
+		dy = y;
+		bRedraw = true;
+		bEditing = true;
+	}
+	if ( nEncoder )
+	{
+		if ( nEncoder < 0 && dn < abs(nEncoder) )
+			dn = 0;
+		else  if ( nEncoder > 0 && 255 - dn < nEncoder )
+			dn = 255;
+		else
+			dn += nEncoder;
+		bRedraw = true;
+	}
+	if ( bRedraw )
+	{
+		DrawMinutes( dx, dy, dn );
+	}
+	if ( key_changes & keydown & (BTN_ALARM1 | BTN_ALARM2) )
+	{
+		*n = dn;
+		bEditing = false;
+		DrawMenu();
+		return EditIntReturn::OK;
+	}
+	return EditIntReturn::Continue;
+}
+
+static void EditAlarmTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	if ( EditInt(&nAlarmRunTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	{
+		WriteEEPROM();
+	}
+}
+static void EditSnoozeTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	if ( EditInt(&nSnoozeTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	{
+		WriteEEPROM();
+	}
+}
+static void EditSleepTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	if ( EditInt(&nSleepTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	{
+		WriteEEPROM();
+	}
+}
+
+static void ExitMenu()
+{
+	RadioOff(true);
+}
+
+
+enum class EditAlarmField : uint8_t
+{
+	Type,
+
+	SchHour,
+	SchMin,
+	SchAmPm,
+	SchSun,
+	SchMon,
+	SchTue,
+	SchWed,
+	SchThu,
+	SchFri,
+	SchSat,
+
+	OODay,
+	OOMonth,
+	OOYear,
+	OOHour,
+	OOMin,
+	OOAmPm,
+
+	Complete
+};
+
+static EditAlarmField editAlarmState;
+
+static void EditAlarmType(Alarm &alarm,uint16_t x,uint8_t y, int16_t nEncoder)
+{
+	uint8_t n = (uint8_t)alarm.type;
+		
+	if ( nEncoder )
+	{
+		if ( nEncoder < 0 && n < abs(nEncoder) )
+			n = 0;
+		else  if ( nEncoder > 0 && (uint8_t)AlarmType::Max - 1 - n < nEncoder )
+			n = (uint8_t)AlarmType::Max - 1;
+		else
+			n += nEncoder;
+
+		if ( n != (uint8_t)alarm.type )
+		{
+			alarm.type = (AlarmType)n;
+			DrawAlarm( alarm, x, y );
+		}
+	}
+}
+
+static void EditAlarmInt2(bool bFirst,uint16_t x, uint8_t y, uint8_t *n, Alarm &alarm, char fill, uint8_t min, uint8_t max, int8_t nEncoder) 
+{
+	bool bRedraw = false;
+	if ( bFirst )
+	{
+		bRedraw = true;
+	}
+	if ( nEncoder )
+	{
+		while ( nEncoder < 0 )
+		{
+			if ( *n > min )
+				(*n)--;
+			nEncoder++;
+		}
+		while ( nEncoder > 0 )
+		{
+			if ( *n < max )
+				(*n)++;
+			nEncoder--;
+		}
+		bRedraw = true;
+	}
+	if ( bRedraw )
+	{
+		char s[5];
+		Make2Int( s, *n, fill );
+		display.WriteText( &font_6x13, x, y, s, 0, 0x3F );
+	}
+}
+
+static void EditAlarmInt4(bool bFirst,uint16_t x, uint8_t y, uint16_t *n, Alarm &alarm, uint16_t min, uint16_t max, int8_t nEncoder)
+{
+	bool bRedraw = false;
+	if ( bFirst )
+	{
+		bRedraw = true;
+	}
+	if ( nEncoder )
+	{
+		while ( nEncoder < 0 )
+		{
+			if ( *n > min )
+			{
+				bRedraw = true;
+				*n--;
+			}
+			nEncoder++;
+		}
+		while ( nEncoder > 0 )
+		{
+			if ( *n < max )
+			{
+				bRedraw = true;
+				*n++;
+			}
+			nEncoder--;
+		}
+	}
+	if ( bRedraw )
+	{
+		char s[5];
+		s[0] = '0' + *n/1000;
+		s[1] = '0' + (*n%1000)/100;
+		s[2] = '0' + (*n%100)/10;
+		s[3] = '0' + (*n%10);
+		s[4] = '\0';
+		display.WriteText( &font_6x13, x, y, s, 0, 0x3f );
+	}
+}
+
+const char *AmPm[] { "am", "pm" };
+
+static void EditAlarmEnum(bool bFirst, uint16_t x, uint8_t y, uint8_t *n, Alarm &alarm, const char **data, uint8_t count, int8_t nEncoder) 
+{
+	bool bRedraw = false;
+
+	if ( bFirst )
+	{
+		bRedraw = true;
+	}
+
+	if ( nEncoder )
+	{
+		while ( nEncoder > 0 )
+		{
+			if ( *n < count-1 )
+			{
+				(*n)++;
+				bRedraw = true;
+			}
+			nEncoder--;
+		}
+		while ( nEncoder < 0 )
+		{
+			if ( *n > 0 )
+			{
+				(*n)--;
+				bRedraw = true;
+			}
+			nEncoder++;
+		}
+	}
+	if ( bRedraw )
+	{
+		display.WriteText( &font_6x13, x,y, data[*n], 0, 0x3f );
+	}
+}
+
+static void EditAlarmDOW(bool bFirst,uint16_t x, uint8_t y, uint8_t *n, uint8_t dow, Alarm &alarm, int8_t nEncoder) 
+{
+	bool bRedraw = false;
+
+	if ( bFirst )
+	{
+		bRedraw = true;
+	}
+
+	if ( nEncoder )
+	{
+		if ( nEncoder > 0 && (*n & _BV(dow)) == 0 )
+		{
+			*n |= _BV(dow);
+			bRedraw = true;
+		}
+		else if ( nEncoder < 0 && (*n & _BV(dow)) != 0 )
+		{
+			*n &= ~_BV(dow);
+			bRedraw = true;
+		}
+	}
+	if ( bRedraw )
+	{
+		display.WriteText( &font_6x13, x,y, WeekDay[dow], 0x3F, (*n & _BV(dow)) ? DOW_BACKGROUND_COLOUR : 0 );
+		display.HLine( x, x+(font_6x13.cols+1)*3, y+ROW_HEIGHT-1, 0xFF);
+	}
+}
+
+EditAlarmField NextField(Alarm &alarm, EditAlarmField field)
+{
+	if ( alarm.type == AlarmType::OneOff )
+	{
+		switch ( field )
+		{
+			case EditAlarmField::Type:		return EditAlarmField::OODay;
+			case EditAlarmField::OODay:		return EditAlarmField::OOMonth;
+			case EditAlarmField::OOMonth:	return EditAlarmField::OOYear;
+			case EditAlarmField::OOYear:	return EditAlarmField::OOHour;
+			case EditAlarmField::OOHour:	return EditAlarmField::OOMin;
+			case EditAlarmField::OOMin:		return EditAlarmField::OOAmPm;
+			case EditAlarmField::OOAmPm:		return EditAlarmField::Complete;
+		}
+	}
+	else if ( alarm.type == AlarmType::Scheduled )
+	{
+		switch ( field )
+		{
+			case EditAlarmField::Type:		return EditAlarmField::SchHour;
+			case EditAlarmField::SchHour:	return EditAlarmField::SchMin;	
+			case EditAlarmField::SchMin:	return EditAlarmField::SchAmPm;	
+			case EditAlarmField::SchAmPm:	return EditAlarmField::SchSun;
+			case EditAlarmField::SchSun:	return EditAlarmField::SchMon;	
+			case EditAlarmField::SchMon:	return EditAlarmField::SchTue;	
+			case EditAlarmField::SchTue:	return EditAlarmField::SchWed;	
+			case EditAlarmField::SchWed:	return EditAlarmField::SchThu;	
+			case EditAlarmField::SchThu:	return EditAlarmField::SchFri;	
+			case EditAlarmField::SchFri:	return EditAlarmField::SchSat;	
+			case EditAlarmField::SchSat:	return EditAlarmField::Complete;
+		}
+	}
+}
+
+static void EditAlarm(uint8_t iAlarm,uint16_t _x,uint8_t _y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	static Alarm alarm;
+	static uint16_t dx;
+	static uint8_t dy;
+
+	if ( bFirst )
+	{
+		editAlarmState = EditAlarmField::Type;
+		dx = _x;
+		dy = _y;
+		alarm = alarms[iAlarm];
+		display.ClearWindow(dx-font_6x13.cols-1,dy, dx + 36*(font_6x13.cols+1),dy+ROW_HEIGHT-2, true);
+		DrawAlarm(alarm,dx,dy);
+		bEditing = true;
+	}
+
+	if ( key_changes & keydown & BTN_TIME_SET )
+	{
+		ExitMenu();
+		return;
+	}
+	if ( key_changes & keydown & BTN_ALARM2 )
+	{
+		switch ( editAlarmState )
+		{
+			case EditAlarmField::Type:
+				if ( alarm.type == AlarmType::Off )
+				{
+					editAlarmState = EditAlarmField::Complete;
+				} 
+				else
+				{
+					editAlarmState = NextField(alarm,editAlarmState);
+					bFirst = true;
+				}
+				break;
+			default:
+				DrawAlarm(alarm,dx,dy);
+				display.HLine( dx, dx+(font_6x13.cols+1)*36, dy+ROW_HEIGHT-1, 0);
+				editAlarmState = NextField(alarm,editAlarmState);
+				bFirst = true;
+				break;
+		}
+	}
+	switch ( editAlarmState )
+	{
+		case EditAlarmField::Type:
+			EditAlarmType(alarm,dx,dy,nEncoder);
+			break;
+		case EditAlarmField::OODay:
+			EditAlarmInt2(bFirst,dx+4*(font_6x13.cols+1),dy,&alarm.nDay,alarm,' ', 1, 31, nEncoder);
+			break;
+		case EditAlarmField::OOMonth:	
+			EditAlarmEnum(bFirst,dx+7*(font_6x13.cols+1),dy,&alarm.nMonth,alarm, Month, countof(Month), nEncoder);
+			break;
+		case EditAlarmField::OOYear:
+			EditAlarmInt4(bFirst,dx+11*(font_6x13.cols+1),dy,&alarm.nYear,alarm, 2015, 2100, nEncoder);
+			break;
+		case EditAlarmField::OOHour:
+			EditAlarmInt2(bFirst,dx+16*(font_6x13.cols+1),dy,&alarm.nHour,alarm,' ', 1, 12, nEncoder);
+			break;
+		case EditAlarmField::OOMin:
+			EditAlarmInt2(bFirst,dx+19*(font_6x13.cols+1),dy,&alarm.nMin,alarm, '0', 0, 59, nEncoder);
+			break;
+		case EditAlarmField::OOAmPm:
+			EditAlarmEnum(bFirst,dx+21*(font_6x13.cols+1),dy,&alarm.nAmPm,alarm, AmPm, countof(AmPm), nEncoder);
+			break;
+		case EditAlarmField::SchHour:	
+			EditAlarmInt2(bFirst,dx,dy,&alarm.nHour,alarm,' ', 1, 12, nEncoder);
+			break;
+		case EditAlarmField::SchMin:
+			EditAlarmInt2(bFirst,dx+3*(font_6x13.cols+1),dy,&alarm.nMin,alarm, '0', 0, 59, nEncoder);
+			break;
+		case EditAlarmField::SchAmPm:
+			EditAlarmEnum(bFirst,dx+5*(font_6x13.cols+1),dy,&alarm.nAmPm,alarm, AmPm, countof(AmPm), nEncoder);
+			break;
+		case EditAlarmField::SchSun:
+			EditAlarmDOW(bFirst,dx+8*(font_6x13.cols+1),dy,&alarm.dow,0,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchMon:
+			EditAlarmDOW(bFirst,dx+12*(font_6x13.cols+1),dy,&alarm.dow,1,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchTue:
+			EditAlarmDOW(bFirst,dx+16*(font_6x13.cols+1),dy,&alarm.dow,2,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchWed:
+			EditAlarmDOW(bFirst,dx+20*(font_6x13.cols+1),dy,&alarm.dow,3,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchThu:
+			EditAlarmDOW(bFirst,dx+24*(font_6x13.cols+1),dy,&alarm.dow,4,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchFri:
+			EditAlarmDOW(bFirst,dx+28*(font_6x13.cols+1),dy,&alarm.dow,5,alarm, nEncoder);
+			break;
+		case EditAlarmField::SchSat:
+			EditAlarmDOW(bFirst,dx+32*(font_6x13.cols+1),dy,&alarm.dow,6,alarm, nEncoder);
+			break;
+		case EditAlarmField::Complete:
+			bEditing = false;
+			alarms[iAlarm] = alarm;
+			WriteEEPROM();
+			DrawMenu();
+			break;
+	}
+}
+
+
+
+Menu menu[] =
+{
+	{ type: MenuType::Alarm,	sDesc: "Alarm 1:",		DrawAlarm, 0,		EditAlarm },
+	{ type: MenuType::Alarm,	sDesc: "Alarm 2:",		DrawAlarm, 1,		EditAlarm },
+	{ type: MenuType::Alarm,	sDesc: "Alarm 3:",		DrawAlarm, 2,		EditAlarm },
+	{ type: MenuType::Alarm,	sDesc: "Alarm 4:",		DrawAlarm, 3,		EditAlarm },
+	{ type: MenuType::Integer8, sDesc: "Alarm Time: ",	DrawAlarmTime, 0,	EditAlarmTime },
+	{ type: MenuType::Integer8, sDesc: "Snooze Time:",  DrawSnoozeTime, 0,	EditSnoozeTime },
+	{ type: MenuType::Integer8, sDesc: "Sleep Time: ",	DrawSleepTime, 0,	EditSleepTime },
+	{ type: MenuType::Button,	sDesc: "Rescan DAB",	NULL, 0,			DoRescanDAB },
+};
+
+
+static void HighlightSelectedRow(int8_t nLastRow)
+{
+	if ( nLastRow >= 0 )
+	{
+		uint8_t iSelectedRow = nLastRow % 4;
+		display.InvertWindow( 0,iSelectedRow*ROW_HEIGHT, OP_SCREENW-1,(iSelectedRow+1)*ROW_HEIGHT-2, true );
+	}
+	uint8_t iSelectedRow = iMenuItem % 4;
+	display.InvertWindow( 0,iSelectedRow*ROW_HEIGHT, OP_SCREENW-1,(iSelectedRow+1)*ROW_HEIGHT-2, true );
+}
+
+
+static void DrawMenu()
+{
+	display.clearScreen(true);
+	uint8_t iStart = (iMenuItem / 4) * 4;
+	for ( uint8_t i = 0; i < 4 && i+iStart < countof(menu); i++ )
+	{
+		uint16_t x = 6;
+		uint8_t y = ROW_HEIGHT * i;
+		display.WriteText( &font_6x13, x, y, menu[i+iStart].sDesc );
+		if ( menu[i+iStart].DrawMenu )
+		{
+			x += (strlen( menu[i+iStart].sDesc ) + 1) * (font_6x13.cols+1);
+			menu[i+iStart].DrawMenu( menu[i+iStart].DrawMenuData, x, y );
+		}
+	}
+	HighlightSelectedRow(-1);
+}
+
+static void StartMenu()
+{
+	clockRadioState = ClockRadioState::Menu;
+	iMenuItem = 0;
+	bEditing = false;
+	display.InitDisplay();
+	DrawMenu();
+}
+
+
+static void UpdateMenu(uint16_t key_changes, int8_t nEncoder )
+{
+	if ( !bEditing )
+	{
+		if ( nEncoder )
+		{
+			uint8_t iLastMenuItem = iMenuItem;
+			while ( nEncoder > 0 )
+			{
+				if ( iMenuItem < countof(menu)-1 )
+					iMenuItem++;
+				nEncoder--;
+			}
+			while ( nEncoder < 0 )
+			{
+				if ( iMenuItem > 0 )
+					iMenuItem--;
+				nEncoder++;
+			}
+
+			if ( iMenuItem != iLastMenuItem )
+			{
+				if ( iMenuItem/4 == iLastMenuItem/4 )
+					HighlightSelectedRow( iLastMenuItem );
+				else
+					DrawMenu();
+			}
+		}
+		else if ( key_changes & keydown & (BTN_ALARM1 | BTN_ALARM2) )
+		{
+			uint16_t x = 6;
+			uint8_t y = ROW_HEIGHT * (iMenuItem % 4);
+			x += (strlen( menu[iMenuItem].sDesc ) + 1) * (font_6x13.cols+1);
+			
+			menu[iMenuItem].DoMenu( menu[iMenuItem].DrawMenuData, x,y, true, 0, 0);
+		}
+		else if ( key_changes & keydown & BTN_TIME_SET )
+		{
+			ExitMenu();
+		}
+	}
+	else if ( bEditing )
+	{
+		menu[iMenuItem].DoMenu( menu[iMenuItem].DrawMenuData, 0,0, false, key_changes, nEncoder);
+	}
+}
+
+
+static void DoClockRadio(uint16_t key_changes, int8_t nEncoder )
+{
 	switch ( clockRadioState )
 	{
 		case ClockRadioState::Off:
@@ -1864,6 +2655,14 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 			{
 				RadioSleep();
 			}
+			else if ( key_changes & keydown & BTN_TIME_SET )
+			{
+				StartMenu();
+			}
+			break;
+
+		case ClockRadioState::Menu:
+			UpdateMenu( key_changes, nEncoder );
 			break;
 
 		case ClockRadioState::Idle:
@@ -1885,10 +2684,9 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 					ScrollText(true);
 				}
 			}
-			if ( nEncoder != nLastEncoder )
+			if ( nEncoder )
 			{
-				int16_t nEncoderChange = nEncoder - nLastEncoder;
-				Tuner( nEncoderChange );
+				Tuner( nEncoder );
 			}
 			else
 			{
@@ -1900,8 +2698,6 @@ static void DoClockRadio(uint16_t key_changes, int16_t nEncoder )
 			}
 			break;
 	}
-
-	nLastEncoder = nEncoder;
 }
 
 void Spinner()
@@ -1932,6 +2728,7 @@ void Spinner()
 	}
 }
 
+// Sliders are log pots, so convert them to near linear
 static uint8_t ConvertVolume( int16_t v )
 {
 	static struct Samples
@@ -1964,7 +2761,7 @@ static uint8_t ConvertVolume( int16_t v )
 		return nLastVolume;
 	else if ( nLastVolume == countof(sample) && v > sample[countof(sample)-1].sample - sample[countof(sample)-1].diff )
 		return nLastVolume;
-	else if ( v > sample[nLastVolume].sample - sample[nLastVolume].diff &&  v < sample[nLastVolume].sample + sample[nLastVolume].diff )
+	else if ( v > sample[nLastVolume-1].sample - sample[nLastVolume-1].diff &&  v < sample[nLastVolume-1].sample + sample[nLastVolume-1].diff )
 		return nLastVolume;
 		
 	uint8_t d = 0;
@@ -1985,7 +2782,7 @@ static time_t MakeTime( uint8_t day, uint8_t month, uint8_t year, uint8_t hour, 
 	t.tm_min = min;
 	t.tm_sec = 0;
 
-	return mk_gmtime(&t);
+	return mktime(&t);
 }
 
 
@@ -2007,20 +2804,36 @@ static time_t NextTimeDue(const Alarm &alarm)
 		switch ( alarm.type )
 		{
 			case AlarmType::OneOff:
-				if ( alarm.nTime < clock_secs )	// Gone
+			{
+				time_t t;
+				struct tm nextTime;
+
+				nextTime.tm_hour = alarm.nHour-1;
+				if ( alarm.nAmPm )
+					nextTime.tm_hour + 12;
+				nextTime.tm_min = alarm.nMin;
+				nextTime.tm_sec = 0;
+				nextTime.tm_mday = alarm.nDay;
+				nextTime.tm_mon = alarm.nMonth;
+				nextTime.tm_year = alarm.nYear - 1900;
+				t = mktime(&nextTime);
+
+				if ( t < clock_secs )	// Gone
 					time = 0;
 				else
-					time = alarm.nTime;
+					time = t;
 				break;
+			}
 			case AlarmType::Scheduled:
 				{
 					struct tm tm_time;
 					gmtime_r((time_t*)&clock_secs, &tm_time);
 
 					// Check which day of the week we are up to.
-					div_t t = div( alarm.nTimeOfDay, 24 );
-					tm_time.tm_hour = t.quot;
-					tm_time.tm_min = t.rem;
+					tm_time.tm_hour = alarm.nHour-1;
+					if ( alarm.nAmPm )
+						tm_time.tm_hour += 12;
+					tm_time.tm_min = alarm.nMin;
 					tm_time.tm_sec = 0;
 					uint8_t dow = tm_time.tm_wday;
 					for ( uint8_t i = 0; i < 8; i++ )	// 7 + 1 days if today's alarm is already gone.
@@ -2028,7 +2841,7 @@ static time_t NextTimeDue(const Alarm &alarm)
 						if ( alarm.dow & _BV(dow) )
 						{
 							// alarm set for this day.  Get seconds and see if we have passed it yet.
-							time = mk_gmtime( &tm_time );
+							time = mktime( &tm_time );
 							if ( time > clock_secs )
 								break;
 						}
@@ -2037,7 +2850,6 @@ static time_t NextTimeDue(const Alarm &alarm)
 							dow = 0;
 						tm_time.tm_mday++;
 					}
-
 				}
 				break;
 		}
@@ -2053,12 +2865,12 @@ static void PrimeAlarms()
 	bool bChange = false;
 	for ( uint8_t i = 0; i < countof(alarms); i++ )
 	{
-		if ( alarms[i].bEnabled )
+		if ( alarms[i].type != AlarmType::Off )
 		{
 			time_t timeDue = NextTimeDue( alarms[i] );
 			if ( timeDue == 0 )
 			{
-				alarms->bEnabled = false;
+				alarms[i].type = AlarmType::Off;
 				bChange = true;
 			}
 			else
@@ -2076,23 +2888,28 @@ static void PrimeAlarms()
 static void ReadEEPROM()
 {
 	memset( alarms, 0, sizeof(alarms) );
-	alarms[0].bEnabled = true;
+
 	alarms[0].type = AlarmType::OneOff;
-	//alarms[0].nTime = 2*60 ; 
-	alarms[0].nTime = MakeTime( 1, 0, 2000-1900, 0, 1 );
-
-	alarms[1].bEnabled = true;
+	alarms[0].nDay = 22;
+	alarms[0].nMonth = 9;
+	alarms[0].nYear = 2016;
+	alarms[0].nHour = 5;
+	alarms[0].nMin	= 20;
+	alarms[0].nAmPm	= 0;
+	
 	alarms[1].type = AlarmType::Scheduled;
-	alarms[1].dow = 0x7F;
-	alarms[1].nTimeOfDay = MakeTime( 5 , 20 );
+	alarms[1].dow = 0b0111110;
+	alarms[1].nHour = 5;
+	alarms[1].nMin = 19;
+	alarms[0].nAmPm	= 1;
 
-	time_t seconds1 = 1, seconds2;
-	struct tm t1, t2;
-	memset(&t1,0,sizeof(t1));
-	memset(&t2,0,sizeof(t2));
-	gmtime_r( &seconds1, &t1 );
-	seconds2 = mk_gmtime(&t1);
-	gmtime_r( &seconds2, &t2 );
+	//time_t seconds1 = 1, seconds2;
+	//struct tm t1, t2;
+	//memset(&t1,0,sizeof(t1));
+	//memset(&t2,0,sizeof(t2));
+	//gmtime_r( &seconds1, &t1 );
+	//seconds2 = mktime(&t1);
+	//gmtime_r( &seconds2, &t2 );
 
 	nAlarmRunTime = 60;
 	nSleepTime = 60;
@@ -2116,6 +2933,57 @@ static void AlarmOff()
 {
 	RadioOff();
 	nAlarmOffTime = 0;
+}
+
+static int8_t ProcessEncoder()
+{
+	const uint8_t ENCODER_RESET_TIMER = 250;			// ms
+	static uint8_t nEncoderResetTimer = 0;
+	static int16_t nLastEncoder = -1;
+	static int8_t nEncoderDelta=0;
+
+	int8_t nEncoderMovement = 0;
+
+	int16_t nEncoder = TCC1.CNT;
+	if ( nEncoder != nLastEncoder )
+	{
+		int16_t nEncoderChange = nEncoder - nLastEncoder;
+		nLastEncoder = nEncoder;
+
+		terminal.Send( "Encoder: ");
+		terminal.Send( (long)nEncoder );
+		terminal.SendCRLF();
+
+		nEncoderDelta += nEncoderChange;
+		nEncoderResetTimer = ENCODER_RESET_TIMER;
+
+		while ( nEncoderDelta >= 4 )
+		{
+			nEncoderMovement++;
+			nEncoderDelta -= 4;	// 4 encoder ticks per detent.
+		}
+		while ( nEncoderDelta <= -4 )
+		{
+			nEncoderMovement--;
+			nEncoderDelta += 4;	// 4 encoder ticks per detent.
+		}
+
+		static uint8_t last_ms8 = 0;
+		uint8_t ms8 = *(uint8_t *)&ms;
+		if ( ms8 != last_ms8 )
+		{
+			last_ms8 = ms8;
+
+			// Clear the encoder count of funny results, not resting on even multiple of 4.
+			if ( nEncoderResetTimer )
+			{
+				nEncoderResetTimer--;
+				if ( nEncoderResetTimer == 0 )
+					nEncoderDelta =0;
+			}
+		}
+	}
+	return nEncoderMovement;
 }
 
 int main(void)
@@ -2142,7 +3010,7 @@ int main(void)
 
 	terminal.Send( "Resetting radio - ");
 	dab.AsyncStart();
-	display.setBrightness(15);
+	display.setBrightness(8);
 
 	programs = (Programs *)__malloc_heap_start;
 
@@ -2200,15 +3068,7 @@ int main(void)
 			}
 		}
 
-		static int16_t nLastEncoder = -1;
-		int16_t nEncoder = TCC1.CNT;
-		if ( nEncoder != nLastEncoder )
-		{
-			nLastEncoder = nEncoder;
-			terminal.Send( "Encoder: ");
-			terminal.Send( (long)nEncoder );
-			terminal.SendCRLF();
-		}
+		int8_t nEncoder = ProcessEncoder();
 
 		uint16_t key_changes=0;
 		static uint8_t last_ms = -1;
@@ -2223,8 +3083,12 @@ int main(void)
 			}
 			last_ms = ms8;
 
-			if ( !bClockInitialised && (ms8 % 20) == 0 )
+			if ( ( !bClockInitialised ||
+				   displayMode == DisplayMode::Scanning )
+				 && (ms8 % 20) == 0 )
+			{
 				Spinner();
+			}
 		}
 
 
@@ -2241,9 +3105,9 @@ int main(void)
 				ADCA.CH0.INTFLAGS |= ADC_CH_CHIF_bm;
 				sum += ADCA.CH0.RES;
 				n++;
-				if ( n == 16 )
+				if ( n == 64 )
 				{
-					volumeSetting = ConvertVolume(sum >> 4);
+					volumeSetting = ConvertVolume(sum >> 6);
 					n = 0;
 					sum = 0;
 				}
@@ -2321,44 +3185,8 @@ DAB
 	-- if program count = 0 dab scan (or just menu?)
 
 	-- show date, when tick over to the next day. (if we are playing).
+
+	-- Remember the last program short name not number.
 */
 
 
-//alarms
-	//* Alarm 1
-		//* enabled one off - day month year hh mk_gmtime
-		//* enabled scheduled - SMTWTFS HH MM
-	//* Alarm 2
-//Alarm Time
-//Snooze Time
-//Sleep Time
-//Rescan DAB
-
-/*
-enum class MenuType : uint8_t
-{
-	Button,
-	Integer8
-};
-
-struct Menu
-{
-	MenuType type;
-	const char *sDesc;
-	union
-	{
-		struct // MenuType::Integer8
-		{
-			uint8_t int8;
-		};
-	};
-} menu[] =
-{	
-	{ type: MenuType::Integer8, sDesc: "Alarm Time" }
-	{ type: MenuType::Integer8, sDesc: "Alarm Time" }
-	{ type: MenuType::Integer8, sDesc: "Snooze Time" }
-	{ type: MenuType::Integer8, sDesc: "Sleep Time" }
-	{ type: MenuType::Button,	sDesc: "Rescan DAB" },
-};
-
-*/
