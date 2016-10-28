@@ -36,7 +36,7 @@ public:
 		static const uint8_t SetUp[] = { SLAVE_ADDR, 0x21 };
 		TSerialTxnImpl::SendTxn( SetUp, countof(SetUp) );
 
-		static const uint8_t Brightness[] = { SLAVE_ADDR, HT16K33_CMD_BRIGHTNESS | 4 };
+		static const uint8_t Brightness[] = { SLAVE_ADDR, HT16K33_CMD_BRIGHTNESS | 1 };
 		TSerialTxnImpl::SendTxn( Brightness, countof(Brightness) );
 
 		static const uint8_t Display[] = { SLAVE_ADDR, HT16K33_BLINK_CMD | HT16K33_BLINK_DISPLAYON | (0 << 1) };

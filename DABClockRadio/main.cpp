@@ -54,7 +54,7 @@ static CSerial< CSerialImpl<CMegaSerialC0,64,64>
 > terminal;
 IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
 
-#define SET_CLOCK_TIMEOUT	300	// Try to set the clock for 5 minutes
+#define SET_CLOCK_TIMEOUT	10 //300	// Try to set the clock for 5 minutes
 static time_t clock_secs = 0;
 static bool bClockInitialised=false;
 static bool bDABClockEnabled = false;
@@ -66,6 +66,9 @@ static void AlarmOff();
 static void RadioOff(bool bForce = false);
 static void DrawMenu();
 static void WriteEEPROM();
+static bool DrawProgramText(bool bNewText);
+static void SetPixel( uint16_t *pixel, uint8_t c, uint8_t nPos );
+static void DrawSignalStength( uint8_t strength );
 
 enum class AlarmType: uint8_t
 {	
@@ -131,6 +134,7 @@ static uint16_t nProgramIdx;
 static char *sProgramNames;
 static uint16_t nLastPlayedProgramIndex;
 static char sLastPlayedProgram[sizeof(eeProgram)];
+static uint8_t lastSignalStrength =0;
 
 static uint16_t nNextProgram;
 static uint8_t nLastVolume = 0;	// What the volume is.
@@ -266,7 +270,7 @@ static void ShowProgram()
 
 	if (  displayMode == DisplayMode::Playing )
 	{
-		display.ClearWindow( 0, 0, OP_SCREENW - 16*(font_6x13.cols+1), 2*ROW_HEIGHT ); 
+		display.ClearWindow( 0, 0, OP_SCREENW - 16*(font_6x13.cols+1), 2*ROW_HEIGHT, true ); 
 		display.WriteText( &font_MSShell, 0, 0, sProgram );
 	}
 }
@@ -374,7 +378,7 @@ static void ioinit()
 	// RTC 
 	PR.PRGEN &= ~PR_RTC_bm;
 	CLK.RTCCTRL =  CLK_RTCSRC_TOSC_gc | CLK_RTCEN_bm;
-	RTC.CTRL = RTC_PRESCALER_DIV256_gc;
+	RTC.CTRL = RTC_PRESCALER_DIV256_gc;						// 1024Hz / 256 -> 4Hz (so we can flash the : each 1/2 second)
 
 	//// Enable dfll32m
 	//OSC.XOSCCTRL = OSC_XOSCSEL_32KHz_gc;
@@ -1033,6 +1037,7 @@ static TaskInit funcPlayProgram_init()
 {
 	ShowProgram();
 	*sCurrentProgramText = 0;
+	DrawProgramText(true);
 	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgramIndex,ms);
 	return TaskInit::OK;
 }
@@ -1292,6 +1297,8 @@ static TaskReturn funcGetSignalStrength_check(AsyncReturnCode ret)
 	{
 		uint8_t strength = dab.MsgBuffer()[0];
 		uint16_t errors = (dab.MsgBuffer()[1] << 8) | dab.MsgBuffer()[2];
+		if ( strength != lastSignalStrength )
+			DrawSignalStength( strength );
 		terminal.Send("Signal Strength: ");
 		terminal.Send(strength);
 		terminal.Send(" Errors: ");
@@ -1579,11 +1586,55 @@ void DoDAB()
 	}
 }
 
+static void DrawSignalStength( uint8_t strength )
+{
+	const int STRENGTH_BARS = 9;
+	const int BAR_WIDTH = 2;
+	const int BAR_SPACING = 1;
+	const int BAR_ON_COLOUR = 0x3F;
+	const int BAR_OFF_COLOUR = 0x4;
+	const int BUFFER_WIDTH = (BAR_WIDTH+BAR_SPACING) * STRENGTH_BARS;
+	const int BUFFER_WIDTH_WORDS = BUFFER_WIDTH / 3;
+
+	if ( displayMode == DisplayMode::Playing )
+	{
+		lastSignalStrength = strength;
+
+		// dab strength is 0-16 (18?)
+		div_t d = div(STRENGTH_BARS * strength, 16);
+		uint8_t strengthBars = d.quot + (d.rem > 16/2 ? 1 : 0);	// Round 
+
+		uint16_t buffer[ (BAR_WIDTH+BAR_SPACING) * STRENGTH_BARS * STRENGTH_BARS / 3 ];
+		memset( buffer, 0, sizeof(buffer) );
+
+		for ( uint8_t b = 0; b < STRENGTH_BARS; b++ )
+		{
+			uint8_t c = (b < strengthBars) ? BAR_ON_COLOUR : BAR_OFF_COLOUR;
+			for ( uint8_t i = 0; i <= b; i++ )
+			{
+				uint8_t x = b * (BAR_WIDTH+BAR_SPACING);
+				uint8_t y = STRENGTH_BARS-1 - i;
+
+				uint16_t *p = buffer + x/3 + y*BUFFER_WIDTH_WORDS;
+				SetPixel( p, c, x % 3 );
+				x++;
+				p = buffer + x/3 + y*BUFFER_WIDTH_WORDS;
+				SetPixel( p, c, x % 3 );
+			}
+		}
+
+		display.SetRow( ROW_HEIGHT, ROW_HEIGHT+STRENGTH_BARS-1 );
+		display.SetColumn( (OP_SCREENW - BUFFER_WIDTH)/3, OP_SCREENW/3 - 1 );
+		display.sendData( buffer, countof(buffer));
+	}
+}
+
 static void DrawPlayingMode()
 {
 	display.clearScreen(true);
 	ShowDate();
 	ShowProgram();
+	DrawSignalStength( 0 );
 }
 
 static void ChangeDisplayMode( DisplayMode mode )
@@ -1722,7 +1773,7 @@ void UpdateTunerDisplay(int8_t nEncoderDelta)
 	static uint8_t nChannelChange = 0;
 	static uint8_t nInactiveTimer = 0;
 
-	const uint8_t CHANNEL_CHANGE_TIMER = (1000/128);	// ms/128
+	const uint8_t CHANNEL_CHANGE_TIMER = (1280/128);	// ms/128
 	const uint8_t INACTIVE_TIMER = (7500l/128);			// ms/128
 
 	while ( nEncoderDelta > 0 )
@@ -1813,6 +1864,7 @@ static void RadioPlay()
 		displayMode = DisplayMode::Playing;
 		display.InitDisplay();
 		ShowDate();
+		DrawSignalStength( 0 );
 		radioState = RadioState::StartPlaying;
 		clockRadioState = ClockRadioState::Idle;
 	}
@@ -2906,6 +2958,7 @@ static time_t NextTimeDue(const Alarm &alarm)
 
 static void PrimeAlarms()
 {
+	terminal.Send("Priming alarms\r\n");
 //bClockInitialised = true;
 
 	nNextAlarmDue = 0;
@@ -3037,6 +3090,7 @@ static void AlarmOff()
 {
 	RadioOff();
 	nAlarmOffTime = 0;
+	bAlarmOn = false;
 }
 
 static int8_t ProcessEncoder()
@@ -3120,8 +3174,8 @@ int main(void)
 	nLastVolume = 0;
 
 	nNextProgram = nLastPlayedProgramIndex = 0;
-
 	uint16_t last_tick = 0;
+	uint16_t delta_tick = 0;
 	bool bFlash = true;
 	ShowTime(clock_secs);
     while (1) 
@@ -3129,25 +3183,46 @@ int main(void)
 		if ( ( RTC.STATUS & RTC_SYNCBUSY_bm ) == 0 )
 		{
 			uint16_t rtc = RTC.CNT;
-			uint16_t tick = rtc >> 2;
-			if ( tick != last_tick )
+			if ( rtc != last_tick )
 			{
-				clock_secs += (tick - last_tick);
-				last_tick = tick;
-
-				if ( !bClockInitialised )
+				bool bChange = false;
+				delta_tick += rtc - last_tick;
+				last_tick = rtc;
+				while ( delta_tick >= 4 )
 				{
-					ShowTime(clock_secs);
+					clock_secs++;
+					delta_tick -= 4;
+					bChange = true;
 				}
-				else
+				if ( bChange )
 				{
-					if ( clock_secs % 60 == 0 )
+					if ( !bClockInitialised )
+					{
 						ShowTime(clock_secs);
+					}
 					else
-						FlashColon(true);
+					{
+						if ( clock_secs % 60 == 0 )
+							ShowTime(clock_secs);
+						else
+							FlashColon(true);
+					}
+					bFlash = true;
+					terminal.Send("tick\r\n");
+					if ( nNextAlarmDue && !bAlarmOn )
+					{
+						if ( clock_secs > nNextAlarmDue )
+						{
+							bAlarmOn = true;
+							// Start alarm
+							AlarmOn();
+						}
+					}
+					if ( nAlarmOffTime && nAlarmOffTime < clock_secs )
+					{
+						AlarmOff();
+					}
 				}
-				bFlash = true;
-				terminal.Send("tick\r\n");
 			}
 			else if ( bFlash && (rtc & 2) != 0 )
 			{
@@ -3156,20 +3231,6 @@ int main(void)
 				else
 					FlashColon(false);
 				bFlash = false;
-			}
-
-			if ( nNextAlarmDue && !bAlarmOn )
-			{
-				if ( clock_secs > nNextAlarmDue )
-				{
-					bAlarmOn = true;
-					// Start alarm
-					AlarmOn();
-				}
-			}
-			if ( nAlarmOffTime && nAlarmOffTime < clock_secs )
-			{
-				AlarmOff();
 			}
 		}
 
@@ -3260,7 +3321,7 @@ DAB
 
 
 -- TODO 
-	- display signal strength and other info.
+	- display  other info.
 
 	- fm support?
 		- beeper?
