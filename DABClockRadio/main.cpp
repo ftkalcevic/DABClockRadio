@@ -99,6 +99,9 @@ static bool bAlarmOn = false;
 static uint8_t nAlarmRunTime;	// in minutes
 static uint8_t nSleepTime;		// in minutes
 static uint8_t nSnoozeTime;		// in minutes
+static uint8_t nTimeIntensity;
+static uint8_t nDABIntensity;
+
 
 
 
@@ -109,6 +112,9 @@ uint8_t eeAlarmRunTime EEMEM;	// in minutes
 uint8_t eeSleepTime EEMEM;		// in minutes
 uint8_t eeSnoozeTime EEMEM;		// in minutes
 Alarm eeAlarms[MAX_ALARMS] EEMEM;
+uint8_t eeTimeIntensity;
+uint8_t eeDABIntensity;
+
 
 
 // Display mode - what is the display showing.
@@ -326,13 +332,13 @@ static void UpdateTime( struct tm &t )
 
 	if ( abs((int32_t)seconds -  (int32_t)clock_secs) > 5 )
 	{
+		bClockInitialised = true;
 		terminal.Send( "Setting time: " );
 		terminal.Send( (long)seconds );
 		terminal.SendCRLF();
 		clock_secs = seconds;
 		PrimeAlarms();
 		ShowTime(clock_secs);
-		bClockInitialised = true;
 	}
 }
 
@@ -2194,6 +2200,13 @@ void DrawMinutes( uint16_t x, uint8_t y, uint8_t n )
 	display.WriteText( &font_6x13, x, y, s );
 }
 
+void DrawUint8( uint16_t x, uint8_t y, uint8_t n )
+{
+	char s[10];		// XX
+	Make2Int( s, n );
+	display.WriteText( &font_6x13, x, y, s );
+}
+
 void DrawAlarmTime(uint8_t,uint16_t x,uint8_t y)
 {
 	DrawMinutes( x,y, nAlarmRunTime );
@@ -2207,6 +2220,15 @@ void DrawSnoozeTime(uint8_t,uint16_t x,uint8_t y)
 void DrawSleepTime(uint8_t,uint16_t x,uint8_t y)
 {
 	DrawMinutes( x,y, nSleepTime );
+}
+
+void DrawTimeIntensity(uint8_t,uint16_t x,uint8_t y)
+{
+	DrawUint8( x,y, nTimeIntensity );
+}
+void DrawDABIntensity(uint8_t,uint16_t x,uint8_t y)
+{
+	DrawUint8( x,y, nDABIntensity );
 }
 
 static void DoRescanDAB(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
@@ -2265,6 +2287,46 @@ static EditIntReturn EditInt(uint8_t *n,uint16_t x,uint8_t y, bool bFirst, uint1
 	return EditIntReturn::Continue;
 }
 
+// eek - copy and paste
+static EditIntReturn EditUInt8(uint8_t *n,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder, uint8_t max)
+{
+	static uint8_t dn;
+	static uint16_t dx;
+	static uint8_t dy;
+
+	bool bRedraw = false;
+	if ( bFirst )
+	{
+		dn = *n;
+		dx = x;
+		dy = y;
+		bRedraw = true;
+		bEditing = true;
+	}
+	if ( nEncoder )
+	{
+		if ( nEncoder < 0 && dn < abs(nEncoder) )
+			dn = 0;
+		else  if ( nEncoder > 0 && max - dn < nEncoder )
+			dn = max;
+		else
+			dn += nEncoder;
+		bRedraw = true;
+	}
+	if ( bRedraw )
+	{
+		DrawUint8( dx, dy, dn );
+	}
+	if ( key_changes & keydown & (BTN_ALARM1 | BTN_ALARM2) )
+	{
+		*n = dn;
+		bEditing = false;
+		DrawMenu();
+		return EditIntReturn::OK;
+	}
+	return EditIntReturn::Continue;
+}
+
 static void EditAlarmTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
 	if ( EditInt(&nAlarmRunTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
@@ -2286,7 +2348,23 @@ static void EditSleepTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t ke
 		WriteEEPROM();
 	}
 }
+static void EditTimeIntensity(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	if ( EditUInt8(&nTimeIntensity,x,y,bFirst,key_changes,nEncoder, 16) == EditIntReturn::OK )
+	{
+		sevenSeg_I2C.SetBrightness(nTimeIntensity);
+		WriteEEPROM();
+	}
+}
 
+static void EditDABIntensity(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
+{
+	if ( EditUInt8(&nDABIntensity,x,y,bFirst,key_changes,nEncoder, 15) == EditIntReturn::OK )
+	{
+		display.setBrightness(nDABIntensity);
+		WriteEEPROM();
+	}
+}
 static void ExitMenu()
 {
 	RadioOff(true);
@@ -2636,6 +2714,8 @@ Menu menu[] =
 	{ type: MenuType::Integer8, sDesc: "Snooze Time:",  DrawSnoozeTime, 0,	EditSnoozeTime },
 	{ type: MenuType::Integer8, sDesc: "Sleep Time: ",	DrawSleepTime, 0,	EditSleepTime },
 	{ type: MenuType::Button,	sDesc: "Rescan DAB",	NULL, 0,			DoRescanDAB },
+	{ type: MenuType::Integer8, sDesc: "Time Intensity:",	DrawTimeIntensity, 0,	EditTimeIntensity},
+	{ type: MenuType::Integer8, sDesc: "DAB Intensity :",	DrawDABIntensity,  0,	EditDABIntensity },
 };
 
 
@@ -3042,6 +3122,8 @@ static void ReadEEPROM()
 	nAlarmRunTime = 60;
 	nSleepTime = 60;
 	nSnoozeTime = 10;
+	nTimeIntensity = 0;
+	nDABIntensity = 4;
 
 	PrimeAlarms();
 #else
@@ -3050,6 +3132,13 @@ static void ReadEEPROM()
 	nAlarmRunTime = eeprom_read_byte( &eeAlarmRunTime );
 	nSleepTime = eeprom_read_byte( &eeSleepTime );
 	nSnoozeTime = eeprom_read_byte( &eeSnoozeTime );
+	nTimeIntensity = eeprom_read_byte( &eeTimeIntensity );
+	nDABIntensity = eeprom_read_byte( &eeDABIntensity );
+
+	if ( nTimeIntensity > 16 )
+		nTimeIntensity = 4;
+	if ( nDABIntensity > 15 )
+		nDABIntensity = 4;
 	eeprom_read_block( alarms, &eeAlarms, sizeof(alarms) );
 
 	uint16_t computed_crc16 = CalcCRC16( (uint8_t *) sLastPlayedProgram, sizeof(sLastPlayedProgram) );
@@ -3165,10 +3254,11 @@ int main(void)
 
 	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
+	sevenSeg_I2C.SetBrightness(nTimeIntensity);
 
 	terminal.Send( "Resetting radio - ");
 	dab.AsyncStart();
-	display.setBrightness(8);
+	display.setBrightness(nDABIntensity);
 
 	programs = (Programs *)__malloc_heap_start;
 	nLastVolume = 0;
