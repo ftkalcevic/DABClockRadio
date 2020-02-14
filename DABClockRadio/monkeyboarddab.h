@@ -171,9 +171,16 @@ enum class AsyncReturnCode: uint8_t
 };
 
 
-template <class TSerialImpl>
+template <class TSerialImpl, class TDebugSerial>
 class CMonkeyBoardDAB: public TSerialImpl
 {
+public:
+	TDebugSerial *debug;
+	CMonkeyBoardDAB(TDebugSerial *debugTerminal)
+	{
+		debug = debugTerminal;
+	}
+
 private:
 	const uint8_t START_BYTE= 0xFE;
 	const uint8_t END_BYTE = 0xFD;
@@ -191,6 +198,7 @@ private:
 
 	uint8_t SendCommand( uint8_t cmdType, uint8_t cmd, uint8_t *data, uint16_t len )
 	{
+	debug->Send("SendCommand "); debug->SendHex( cmdType ); debug->Send(' '); debug->SendHex(cmd); debug->SendCRLF();
 		uint8_t sn = serialNumber++;
 		TSerialImpl::SendChar( START_BYTE );
 		TSerialImpl::SendChar( cmdType );
@@ -219,6 +227,7 @@ private:
 			if ( TSerialImpl::IsDataAvailable() )
 			{
 				buf[n++] = TSerialImpl::ReadByte();
+				debug->SendHex(buf[n-1]);
 				timeout = 0;
 			}
 			else
@@ -253,6 +262,7 @@ private:
 				if ( bReadingHeader )
 				{
 					header[nIndex++] = TSerialImpl::ReadByte();
+					debug->Send('.');
 					if ( nIndex == sizeof(header) )
 					{
 						if ( header[0] == START_BYTE &&
@@ -270,6 +280,7 @@ private:
 								  header[3] == sn )
 						{
 							uint8_t b = TSerialImpl::ReadByte();
+				debug->Send('.');
 							b = b;
 							return ErrorCleanup();
 						}
@@ -282,6 +293,7 @@ private:
 				else
 				{
 					uint8_t b = TSerialImpl::ReadByte();
+				debug->Send('.');
 					nIndex++;
 					if ( (nIndex & 1) == 0 )	// Unicode, so only take alternate characters
 					{
@@ -317,6 +329,7 @@ private:
 			if ( TSerialImpl::IsDataAvailable() )
 			{
 				TSerialImpl::ReadByte();
+				debug->Send('.');
 				timeout = 0;
 			}
 			else
@@ -377,6 +390,7 @@ public:
 			while ( TSerialImpl::IsDataAvailable() )
 			{
 				uint8_t b = TSerialImpl::ReadByte();
+				debug->SendHex(b);
 				if ( b == 0x1B )
 					return true;
 				//TSerialImpl::Send(0x55);
@@ -1005,6 +1019,7 @@ public:
 				while ( TSerialImpl::IsDataAvailable() )
 				{
 					uint8_t b = TSerialImpl::ReadByte();
+				debug->SendHex(b);
 					if ( b == 0x1B )
 					{
 						state = DABState::Idle;
@@ -1024,6 +1039,7 @@ public:
 				while ( TSerialImpl::IsDataAvailable() )
 				{
 					uint8_t b = TSerialImpl::ReadByte();
+				debug->SendHex(b);
 					if ( wait_byte_count < 5 )
 					{
 						header[wait_byte_count++] = b;
@@ -1125,7 +1141,8 @@ public:
 
 				while ( TSerialImpl::IsDataAvailable() )
 				{
-					TSerialImpl::ReadByte();
+					uint8_t b = TSerialImpl::ReadByte();
+				debug->SendHex(b);
 					timer = clock + WAIT_FOR_IDLE_TIME;
 				}
 				break;
@@ -1156,6 +1173,7 @@ public:
 				while ( TSerialImpl::IsDataAvailable() )
 				{
 					uint8_t b = TSerialImpl::ReadByte();
+				debug->SendHex(b);
 					if ( wait_byte_count < 5 )
 					{
 						wait_header[wait_byte_count++] = b;

@@ -39,22 +39,29 @@
 
 #define SLAVE_ADDR (0x70<<1)
 
+static CSerial< CSerialImpl<CMegaSerialC0,64,64>
+#ifndef DEBUG
+, false
+#endif
+> terminal;
+IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
+
 static SevenSeg< CSerialTxn< CSerialTxnImpl< CMegaI2CE, 64, 8> >, SLAVE_ADDR> sevenSeg_I2C;
 IMPLEMENT_SERIAL_TXN_INTERRUPTS(E,sevenSeg_I2C)
-static CMonkeyBoardDAB<CSerial< CSerialImpl<CMegaSerialE0,64,64> > > dab;
+static CMonkeyBoardDAB<CSerial< CSerialImpl<CMegaSerialE0,64,64> >,
+CSerial< CSerialImpl<CMegaSerialC0,64,64>
+#ifndef DEBUG
+, false
+#endif
+>
+ > dab(&terminal);
 IMPLEMENT_SERIAL_INTERRUPTS( E0, dab )
 static Pictiva display;
 
 //SevenSeg< CSerialTxn< CSerialTxnPolledImpl< CMegaI2CE > >, SLAVE_ADDR> sevenSeg_I2C;
 
-static CSerial< CSerialImpl<CMegaSerialC0,64,64>
-#ifndef DEBUG
-, false 
-#endif
-> terminal;
-IMPLEMENT_SERIAL_INTERRUPTS( C0, terminal )
-
-#define SET_CLOCK_TIMEOUT	10 //300	// Try to set the clock for 5 minutes
+//#define SET_CLOCK_AT_POWERUP
+#define SET_CLOCK_TIMEOUT	300	// Try to set the clock for 5 minutes
 static time_t clock_secs = 0;
 static bool bClockInitialised=false;
 static bool bDABClockEnabled = false;
@@ -92,30 +99,30 @@ struct Alarm
 };
 
 #define MAX_ALARMS	4
-static Alarm alarms[MAX_ALARMS];
+//static Alarm alarms[MAX_ALARMS];
 static time_t nNextAlarmDue;
 static time_t nAlarmOffTime = 0;
 static bool bAlarmOn = false;
-static uint8_t nAlarmRunTime;	// in minutes
-static uint8_t nSleepTime;		// in minutes
-static uint8_t nSnoozeTime;		// in minutes
-static uint8_t nTimeIntensity;
-static uint8_t nDABIntensity;
+//static uint8_t nAlarmRunTime;	// in minutes
+//static uint8_t nSleepTime;		// in minutes
+//static uint8_t nSnoozeTime;		// in minutes
+//static uint8_t nTimeIntensity;
+//static uint8_t nDABIntensity;
 
 
+static struct  SEEPROMBlock
+{
+	uint16_t nLastPlayedProgramIndex;
+	Alarm Alarms[MAX_ALARMS];
+	uint8_t nAlarmRunTime;	// in minutes
+	uint8_t nSleepTime;		// in minutes
+	uint8_t nSnoozeTime;	// in minutes
+	uint8_t nTimeIntensity;
+	uint8_t nDABIntensity;
+	uint16_t crc16;			// CRC of eeProgram[20] to verify if EEPROM has been set.
+} settings;
 
-
-
-uint16_t eeProgramChecksum EEMEM;	// CRC of eeProgram[20] to verify if EEPROM has been set.
-char eeProgram[20] EEMEM;		// Last program (abbreviated name)
-uint8_t eeAlarmRunTime EEMEM;	// in minutes
-uint8_t eeSleepTime EEMEM;		// in minutes
-uint8_t eeSnoozeTime EEMEM;		// in minutes
-Alarm eeAlarms[MAX_ALARMS] EEMEM;
-uint8_t eeTimeIntensity;
-uint8_t eeDABIntensity;
-
-
+SEEPROMBlock eeprom_data EEMEM;
 
 // Display mode - what is the display showing.
 enum class DisplayMode: uint8_t
@@ -138,8 +145,8 @@ static Programs *programs;
 static uint16_t nPrograms;
 static uint16_t nProgramIdx;
 static char *sProgramNames;
-static uint16_t nLastPlayedProgramIndex;
-static char sLastPlayedProgram[sizeof(eeProgram)];
+//static uint16_t nLastPlayedProgramIndex;
+//static char sLastPlayedProgram[sizeof(eeProgram)];
 static uint8_t lastSignalStrength =0;
 
 static uint16_t nNextProgram;
@@ -268,7 +275,7 @@ static void ShowTime( long nSeconds )
 
 static void ShowProgram()
 {
-	const char *sProgram = programs[nLastPlayedProgramIndex].sLongName;
+	const char *sProgram = programs[settings.nLastPlayedProgramIndex].sLongName;
 
 	terminal.Send("ProgramName: ");
 	terminal.Send(sProgram);
@@ -874,8 +881,22 @@ static TaskReturn funcGetClockStatus_check(AsyncReturnCode ret)
 	{
 		bEnabled = dab.MsgBuffer()[0] != 0;
 	}
+
 	if ( bEnabled )
+	{
 		bDABClockEnabled = bEnabled;
+	}
+	else
+	{
+		if ( clock_secs > SET_CLOCK_TIMEOUT )
+		{
+			terminal.Send("set clock timeout\r\n");
+			return TaskReturn::Done;	// give up
+		}
+		else
+			return TaskReturn::Fail;	
+	}
+
 	return bEnabled ? TaskReturn::Done : TaskReturn::Fail;
 #else
 	PrimeAlarms();
@@ -948,7 +969,10 @@ static TaskReturn funcGetClock_check(AsyncReturnCode ret)
 	else
 	{
 		if ( clock_secs > SET_CLOCK_TIMEOUT )
+		{
+			terminal.Send("get clock timeout\r\n");
 			return TaskReturn::Done;	// give up
+		}
 		else
 			return TaskReturn::Fail;	
 	}
@@ -975,6 +999,8 @@ static TaskReturn funcGetProgramCount_check(AsyncReturnCode ret)
 		memset( programs, 0, program_space );
 		sProgramNames = (char *)programs + program_space;
 		nProgramIdx = 0;
+		if ( settings.nLastPlayedProgramIndex >= nPrograms )
+			settings.nLastPlayedProgramIndex = 0;
 		return TaskReturn::Done;
 	}
 	else
@@ -1018,16 +1044,14 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 			return TaskReturn::Continue;
 		else
 		{
-			for ( uint8_t i = 0; i < nPrograms; i++ )
-			{
-				if ( strcasecmp( programs[i].sShortName, sLastPlayedProgram ) == 0 )
-				{
-					nNextProgram = nLastPlayedProgramIndex = i;
-					break;
-				}
-			}
+			nNextProgram = settings.nLastPlayedProgramIndex;
 			return TaskReturn::Done;
 		}
+	}
+	else if ( ret == AsyncReturnCode::ReplyNack )
+	{
+		// Nack probably means there are no programs.
+		return TaskReturn::Done;
 	}
 	else
 		return TaskReturn::Fail;
@@ -1035,7 +1059,7 @@ static TaskReturn funcGetPrograms_check(AsyncReturnCode ret)
 
 static TaskInit funcPlayProgramForTime_init()
 {
-	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgramIndex,ms);
+	dab.STREAM_Play_Async(DABPlayMode::DAB,settings.nLastPlayedProgramIndex,ms);
 	return TaskInit::OK;
 }
 
@@ -1044,7 +1068,7 @@ static TaskInit funcPlayProgram_init()
 	ShowProgram();
 	*sCurrentProgramText = 0;
 	DrawProgramText(true);
-	dab.STREAM_Play_Async(DABPlayMode::DAB,nLastPlayedProgramIndex,ms);
+	dab.STREAM_Play_Async(DABPlayMode::DAB,settings.nLastPlayedProgramIndex,ms);
 	return TaskInit::OK;
 }
 
@@ -1067,19 +1091,19 @@ void InitStartUpTasks()
 	task = 0;
 	nTaskCount = 0;
 
-	TaskList[nTaskCount++] = { funcPlayProgramForTime_init, ack_check };
 	TaskList[nTaskCount++] = { funcSetVolume0_init, ack_check };
 	TaskList[nTaskCount++] = { funcEnableSyncClock_init, ack_check };
 	TaskList[nTaskCount++] = { funcGetProgramCount_init, funcGetProgramCount_check };
 	TaskList[nTaskCount++] = { funcGetPrograms_init, funcGetPrograms_check };
 	TaskList[nTaskCount++] = { funcGetSyncClockStatus_init, funcGetSyncClockStatus_check };
-	TaskList[nTaskCount++] = { funcGetClockStatus_init, funcGetClockStatus_check };
 #ifdef SET_CLOCK_AT_POWERUP
+	TaskList[nTaskCount++] = { funcPlayProgramForTime_init, ack_check };
+	TaskList[nTaskCount++] = { funcGetClockStatus_init, funcGetClockStatus_check };
 	TaskList[nTaskCount++] = { funcGetClock_init, funcGetClock_check };
+	TaskList[nTaskCount++] = { funcStopPlaying_init, ack_check };
 #else
 	bClockInitialised = true;
 #endif
-	TaskList[nTaskCount++] = { funcStopPlaying_init, ack_check };
 	TaskList[nTaskCount++] = { funcPowerOff_init, NULL };
 }
 
@@ -1234,10 +1258,9 @@ static void InitGetProgramTextTasks()
 
 static TaskInit funcChangeProgram_init() 
 { 
-	if ( nNextProgram != nLastPlayedProgramIndex )
+	if ( nNextProgram != settings.nLastPlayedProgramIndex )
 	{
-		nLastPlayedProgramIndex = nNextProgram;
-		strcpy( sLastPlayedProgram, programs[nLastPlayedProgramIndex].sShortName );
+		settings.nLastPlayedProgramIndex = nNextProgram;
 		WriteEEPROM();
 		return funcPlayProgram_init();
 	}
@@ -1418,17 +1441,17 @@ static uint32_t playPollTimer = 0;
 
 void DoDAB()
 {
-	//{
-		//static RadioState lastState = RadioState::Init;
-		//if ( lastState != radioState )
-		//{
-			//terminal.Send((uint8_t)lastState);
-			//terminal.Send("->");
-			//terminal.Send((uint8_t)radioState);
-			//terminal.SendCRLF();
-			//lastState = radioState;
-		//}
-	//}
+	{
+		static RadioState lastState = RadioState::Init;
+		if ( lastState != radioState )
+		{
+			terminal.Send((uint8_t)lastState);
+			terminal.Send("->");
+			terminal.Send((uint8_t)radioState);
+			terminal.SendCRLF();
+			lastState = radioState;
+		}
+	}
 	AsyncReturnCode ret = dab.Async( ms );
 	if ( ret != AsyncReturnCode::OK )
 	{
@@ -1439,6 +1462,7 @@ void DoDAB()
 		switch ( radioState )
 		{
 			case RadioState::Init:
+				//dab.AsyncStart();
 				dab.SYSTEM_GetSysRdy_Async(ms,500);
 				SetWaitForReply( RadioState::InitStartUpTasks, RadioState::Init );
 				//SetWaitForReply( RadioState::Idle, RadioState::Init );
@@ -1461,6 +1485,7 @@ void DoDAB()
 			{
 				// Next task
 				TaskInit t = TaskList[task].init();
+				terminal.Send("Task="); terminal.Send((int)task); terminal.SendCRLF();
 				if ( t == TaskInit::OK || t == TaskInit::Skip )
 				{
 					if ( t == TaskInit::Skip || TaskList[task].check == NULL )
@@ -1767,7 +1792,7 @@ void InitTunerDisplay()
 {
 	display.clearScreen(false);
 
-	nTunerPosition = nLastPlayedProgramIndex * ROW_HEIGHT;	// We use pixel scrolling postions
+	nTunerPosition = settings.nLastPlayedProgramIndex * ROW_HEIGHT;	// We use pixel scrolling postions
 	nTunerTarget = nTunerPosition;
 
 	DrawTuner();
@@ -1880,7 +1905,7 @@ static void RadioSleep()
 {
 	RadioPlay();
 	bAlarmOn = true;	// fake alarm
-	nAlarmOffTime = clock_secs + nSleepTime*60;
+	nAlarmOffTime = clock_secs + settings.nSleepTime*60;
 }
 
 
@@ -2190,7 +2215,7 @@ void DrawAlarm( Alarm &alarm,uint16_t x,uint8_t y)
 
 void DrawAlarm(uint8_t iAlarm,uint16_t x,uint8_t y)
 {
-	DrawAlarm(alarms[iAlarm],x,y);
+	DrawAlarm(settings.Alarms[iAlarm],x,y);
 }
 void DrawMinutes( uint16_t x, uint8_t y, uint8_t n )
 {
@@ -2209,26 +2234,26 @@ void DrawUint8( uint16_t x, uint8_t y, uint8_t n )
 
 void DrawAlarmTime(uint8_t,uint16_t x,uint8_t y)
 {
-	DrawMinutes( x,y, nAlarmRunTime );
+	DrawMinutes( x,y, settings.nAlarmRunTime );
 }
 
 void DrawSnoozeTime(uint8_t,uint16_t x,uint8_t y)
 {
-	DrawMinutes( x,y, nSnoozeTime );
+	DrawMinutes( x,y, settings.nSnoozeTime );
 }
 
 void DrawSleepTime(uint8_t,uint16_t x,uint8_t y)
 {
-	DrawMinutes( x,y, nSleepTime );
+	DrawMinutes( x,y, settings.nSleepTime );
 }
 
 void DrawTimeIntensity(uint8_t,uint16_t x,uint8_t y)
 {
-	DrawUint8( x,y, nTimeIntensity );
+	DrawUint8( x,y, settings.nTimeIntensity );
 }
 void DrawDABIntensity(uint8_t,uint16_t x,uint8_t y)
 {
-	DrawUint8( x,y, nDABIntensity );
+	DrawUint8( x,y, settings.nDABIntensity );
 }
 
 static void DoRescanDAB(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
@@ -2329,39 +2354,39 @@ static EditIntReturn EditUInt8(uint8_t *n,uint16_t x,uint8_t y, bool bFirst, uin
 
 static void EditAlarmTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
-	if ( EditInt(&nAlarmRunTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	if ( EditInt(&settings.nAlarmRunTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
 	{
 		WriteEEPROM();
 	}
 }
 static void EditSnoozeTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
-	if ( EditInt(&nSnoozeTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	if ( EditInt(&settings.nSnoozeTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
 	{
 		WriteEEPROM();
 	}
 }
 static void EditSleepTime(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
-	if ( EditInt(&nSleepTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
+	if ( EditInt(&settings.nSleepTime,x,y,bFirst,key_changes,nEncoder) == EditIntReturn::OK )
 	{
 		WriteEEPROM();
 	}
 }
 static void EditTimeIntensity(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
-	if ( EditUInt8(&nTimeIntensity,x,y,bFirst,key_changes,nEncoder, 16) == EditIntReturn::OK )
+	if ( EditUInt8(&settings.nTimeIntensity,x,y,bFirst,key_changes,nEncoder, 16) == EditIntReturn::OK )
 	{
-		sevenSeg_I2C.SetBrightness(nTimeIntensity);
+		sevenSeg_I2C.SetBrightness(settings.nTimeIntensity);
 		WriteEEPROM();
 	}
 }
 
 static void EditDABIntensity(uint8_t,uint16_t x,uint8_t y, bool bFirst, uint16_t key_changes, int16_t nEncoder)
 {
-	if ( EditUInt8(&nDABIntensity,x,y,bFirst,key_changes,nEncoder, 15) == EditIntReturn::OK )
+	if ( EditUInt8(&settings.nDABIntensity,x,y,bFirst,key_changes,nEncoder, 15) == EditIntReturn::OK )
 	{
-		display.setBrightness(nDABIntensity);
+		display.setBrightness(settings.nDABIntensity);
 		WriteEEPROM();
 	}
 }
@@ -2605,7 +2630,7 @@ static void EditAlarm(uint8_t iAlarm,uint16_t _x,uint8_t _y, bool bFirst, uint16
 		editAlarmState = EditAlarmField::Type;
 		dx = _x;
 		dy = _y;
-		alarm = alarms[iAlarm];
+		alarm = settings.Alarms[iAlarm];
 		display.ClearWindow(dx-font_6x13.cols-1,dy, dx + 36*(font_6x13.cols+1),dy+ROW_HEIGHT-2, true);
 		DrawAlarm(alarm,dx,dy);
 		bEditing = true;
@@ -2694,7 +2719,7 @@ static void EditAlarm(uint8_t iAlarm,uint16_t _x,uint8_t _y, bool bFirst, uint16
 			break;
 		case EditAlarmField::Complete:
 			bEditing = false;
-			alarms[iAlarm] = alarm;
+			settings.Alarms[iAlarm] = alarm;
 			WriteEEPROM();
 			PrimeAlarms();
 			DrawMenu();
@@ -2834,7 +2859,7 @@ static void DoClockRadio(uint16_t key_changes, int8_t nEncoder )
 			if ( key_changes & keydown & BTN_SNOOZE && bAlarmOn )
 			{
 				AlarmOff();
-				nNextAlarmDue = clock_secs + nSnoozeTime*60;
+				nNextAlarmDue = clock_secs + settings.nSnoozeTime*60;
 			}
 			if ( key_changes & keydown & BTN_RADIO_OFF )
 			{
@@ -3043,14 +3068,14 @@ static void PrimeAlarms()
 
 	nNextAlarmDue = 0;
 	bool bChange = false;
-	for ( uint8_t i = 0; i < countof(alarms); i++ )
+	for ( uint8_t i = 0; i < countof(settings.Alarms); i++ )
 	{
-		if ( alarms[i].type != AlarmType::Off )
+		if ( settings.Alarms[i].type != AlarmType::Off )
 		{
-			time_t timeDue = NextTimeDue( alarms[i] );
+			time_t timeDue = NextTimeDue( settings.Alarms[i] );
 			if ( timeDue == 0 )
 			{
-				alarms[i].type = AlarmType::Off;
+				settings.Alarms[i].type = AlarmType::Off;
 				bChange = true;
 			}
 			else
@@ -3080,14 +3105,15 @@ static uint16_t CalcCRC16( const uint8_t *buf, uint8_t len )
 
 static void WriteEEPROM()
 {
-	eeprom_write_block( sLastPlayedProgram, &eeProgram, sizeof(sLastPlayedProgram) );
-	eeprom_write_byte( &eeAlarmRunTime, nAlarmRunTime );
-	eeprom_write_byte( &eeSleepTime, nSleepTime );
-	eeprom_write_byte( &eeSnoozeTime, nSnoozeTime );
-	eeprom_write_block( alarms, &eeAlarms, sizeof(alarms) );
+	uint16_t crc16 = CalcCRC16( (uint8_t *)&settings, sizeof(settings)-2 );
+	settings.crc16 = crc16;
+	eeprom_write_block( &settings, &eeprom_data, sizeof(settings) );
 
-	uint16_t crc16 = CalcCRC16( (uint8_t *)sLastPlayedProgram, sizeof(sLastPlayedProgram) );
-	eeprom_write_word( &eeProgramChecksum, crc16 );
+	terminal.Send("Write Intensity");
+	terminal.Send(settings.nTimeIntensity);
+	terminal.Send(',');
+	terminal.Send(settings.nDABIntensity);
+	terminal.SendCRLF();
 }
 
 
@@ -3127,38 +3153,34 @@ static void ReadEEPROM()
 
 	PrimeAlarms();
 #else
-	eeprom_read_block( sLastPlayedProgram, &eeProgram, sizeof(sLastPlayedProgram) );
-	uint16_t crc16 = eeprom_read_word( &eeProgramChecksum );
-	nAlarmRunTime = eeprom_read_byte( &eeAlarmRunTime );
-	nSleepTime = eeprom_read_byte( &eeSleepTime );
-	nSnoozeTime = eeprom_read_byte( &eeSnoozeTime );
-	nTimeIntensity = eeprom_read_byte( &eeTimeIntensity );
-	nDABIntensity = eeprom_read_byte( &eeDABIntensity );
+	eeprom_read_block( &settings, &eeprom_data, sizeof(settings) );
 
-	if ( nTimeIntensity > 16 )
-		nTimeIntensity = 4;
-	if ( nDABIntensity > 15 )
-		nDABIntensity = 4;
-	eeprom_read_block( alarms, &eeAlarms, sizeof(alarms) );
+	terminal.Send("Read Intensity");
+	terminal.Send(settings.nTimeIntensity);
+	terminal.Send(',');
+	terminal.Send(settings.nDABIntensity);
+	terminal.SendCRLF();
 
-	uint16_t computed_crc16 = CalcCRC16( (uint8_t *) sLastPlayedProgram, sizeof(sLastPlayedProgram) );
-	if ( crc16 != computed_crc16 )
+	uint16_t computed_crc16 = CalcCRC16( (uint8_t *)&settings, sizeof(settings)-2 );
+	if ( settings.crc16 != computed_crc16 )
 	{
+		terminal.Send("CRC Failed"); terminal.SendCRLF();
 		// CRC failed.  Init sane defaults.
-		sLastPlayedProgram[0] = 0;
-		nAlarmRunTime = 60;
-		nSleepTime = 60;
-		nSnoozeTime = 10;
-		alarms[0].type = AlarmType::Off;
-		alarms[0].dow = 0x7F;
-		alarms[0].nAmPm = 0;
-		alarms[0].nDay = 1;
-		alarms[0].nMonth = 0;
-		alarms[0].nYear = 2016;
-		alarms[0].nHour = 7;
-		alarms[0].nMin = 30;
+		settings.nLastPlayedProgramIndex = 0;
+		settings.nAlarmRunTime = 60;
+		settings.nSleepTime = 60;
+		settings.nSnoozeTime = 10;
+		settings.Alarms[0].type = AlarmType::Off;
+		settings.Alarms[0].dow = 0x7F;
+		settings.Alarms[0].nAmPm = 0;
+		settings.Alarms[0].nDay = 1;
+		settings.Alarms[0].nMonth = 0;
+		settings.Alarms[0].nYear = 2016;
+		settings.Alarms[0].nHour = 7;
+		settings.Alarms[0].nMin = 30;
 		for ( uint8_t i = 1; i < MAX_ALARMS; i++ )
-			alarms[i] = alarms[0];
+			settings.Alarms[i] = settings.Alarms[0];
+		settings.crc16 = CalcCRC16( (uint8_t *)&settings, sizeof(settings)-2 );
 
 		WriteEEPROM();
 	}
@@ -3172,7 +3194,7 @@ static void AlarmOn()
 	RadioPlay();
 	// Set for the next alarm.
 	PrimeAlarms();
-	nAlarmOffTime = clock_secs + nAlarmRunTime * 60;
+	nAlarmOffTime = clock_secs + settings.nAlarmRunTime * 60;
 }
 
 static void AlarmOff()
@@ -3254,16 +3276,16 @@ int main(void)
 
 	terminal.Send( "\r\nDBA Clock Radio Starting\r\n");
 	sevenSeg_I2C.Start();
-	sevenSeg_I2C.SetBrightness(nTimeIntensity);
+	sevenSeg_I2C.SetBrightness(settings.nTimeIntensity);
 
 	terminal.Send( "Resetting radio - ");
 	dab.AsyncStart();
-	display.setBrightness(nDABIntensity);
+	display.setBrightness(settings.nDABIntensity);
 
 	programs = (Programs *)__malloc_heap_start;
 	nLastVolume = 0;
 
-	nNextProgram = nLastPlayedProgramIndex = 0;
+	nNextProgram = settings.nLastPlayedProgramIndex = 0;
 	uint16_t last_tick = 0;
 	uint16_t delta_tick = 0;
 	bool bFlash = true;
