@@ -1157,7 +1157,7 @@ static void InitStartTasks()
 
 static TaskInit funcClearDatabase_init() 
 {
-	dab.STREAM_ClearDatabase_Async(40,ms);
+	dab.STREAM_ClearDatabase_Async(ms);
 	display.WriteText(&font_6x13,0,ROW_HEIGHT*0,"Scanning");
 	return TaskInit::OK;
 }
